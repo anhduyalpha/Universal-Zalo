@@ -1,28 +1,28 @@
 # ==============================================================================
-# Multi-stage Dockerfile cho Rust SOCKS5 Proxy & Storage Engine
+# Multi-stage Dockerfile cho Rust SOCKS5 Proxy & Storage Engine (Rust 1.85+ Bookworm)
 # ==============================================================================
-FROM rust:1.79-bullseye as builder
+FROM rust:1.85-bookworm as builder
 
 WORKDIR /usr/src/app
 
-# Cài đặt protobuf-compiler và openssl
+# Cài đặt protobuf-compiler, openssl và build essentials
 RUN apt-get update && apt-get install -y protobuf-compiler libssl-dev pkg-config cmake
 
-# Copy workspace
+# Copy workspace và crates
 COPY Cargo.toml ./
 COPY crates ./crates
 
 # Build release binaries
 RUN cargo build --release -p zalo-proxy -p zalo-daemon
 
-# Runtime container siêu nhẹ
-FROM debian:bullseye-slim
+# Runtime container siêu nhẹ trên Debian Bookworm
+FROM debian:bookworm-slim
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl1.1 \
+    libssl3 \
     libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 

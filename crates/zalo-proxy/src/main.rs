@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let ca = Arc::new(CertAuthority::load_or_create(&args.cert_dir)?);
 
-    let bind_addr: SocketAddr = format!("127.0.0.1:{}", args.port).parse()?;
+    let bind_addr: SocketAddr = format!("0.0.0.0:{}", args.port).parse()?;
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!("🚀 Zalo SOCKS5 Loopback Proxy listening on {}", bind_addr);
 
@@ -62,9 +62,12 @@ async fn main() -> Result<()> {
                                     if let Ok(target_stream) =
                                         TcpStream::connect(format!("{}:{}", domain, port)).await
                                     {
-                                        let root_store = tokio_rustls::rustls::RootCertStore {
-                                            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-                                        };
+                                        let mut root_store =
+                                            tokio_rustls::rustls::RootCertStore::empty();
+                                        root_store.extend(
+                                            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+                                        );
+
                                         let client_config =
                                             tokio_rustls::rustls::ClientConfig::builder()
                                                 .with_root_certificates(root_store)
