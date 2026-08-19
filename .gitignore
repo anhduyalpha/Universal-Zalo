@@ -1,0 +1,13 @@
+target/
+node_modules/
+.pnpm-store/
+*.log
+certs/*.key
+certs/*.crt
+dist/
+.env.local
+.DS_Store
+Thumbs.db
+*.db-journal
+*.db-wal
+*.db-shm

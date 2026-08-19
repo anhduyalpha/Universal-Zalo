@@ -1,0 +1,15 @@
+[Unit]
+Description=Universal Zalo Headless Chromium Runner
+After=network.target zalo-proxy.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/universal-zalo
+ExecStart=/bin/bash /opt/universal-zalo/scripts/run_headless_linux.sh socks5://127.0.0.1:9050 /opt/universal-zalo/profile https://chat.zalo.me
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

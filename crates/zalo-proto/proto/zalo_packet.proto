@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package zalo.packet;
+
+enum PacketType {
+  UNKNOWN = 0;
+  CLIENT_MESSAGE_SEND = 1;
+  SERVER_MESSAGE_ACK = 2;
+  SERVER_SYNC_EVENT = 3;
+  HEARTBEAT_PING = 4;
+  HEARTBEAT_PONG = 5;
+  READ_RECEIPT = 6;
+  TYPING_STATUS = 7;
+  E2EE_ENVELOPE = 8;
+}
+
+message ZaloPacketHeader {
+  uint32 seq_id = 1;
+  uint32 cmd = 2;
+  uint32 sub_cmd = 3;
+  uint64 timestamp = 4;
+  string client_version = 5;
+}
+
+message ZaloTextMessage {
+  string conversation_id = 1;
+  string sender_id = 2;
+  string text_content = 3;
+  uint64 client_timestamp = 4;
+  string idempotency_key = 5;
+}
+
+message ZaloAckPayload {
+  uint32 ack_seq_id = 1;
+  uint32 status_code = 2;
+  string error_message = 3;
+  uint64 server_timestamp = 4;
+  uint32 unread_badge = 5;
+}
+
+message ZaloSyncPayload {
+  uint64 sync_token = 1;
+  string conversation_id = 2;
+  string last_msg_id = 3;
+  uint32 server_seq = 4;
+}
+
+message ZaloWireEnvelope {
+  ZaloPacketHeader header = 1;
+  PacketType packet_type = 2;
+  bytes payload = 3;
+}

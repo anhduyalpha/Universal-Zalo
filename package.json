@@ -1,0 +1,16 @@
+{
+  "name": "universal-zalo-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev:proxy": "cargo run -p zalo-proxy",
+    "test:proxy": "cargo test -p zalo-proxy",
+    "test:proto": "cargo test -p zalo-proto",
+    "test:crypto": "cargo test -p zalo-crypto",
+    "test:storage": "cargo test -p zalo-storage",
+    "test:daemon": "cargo test -p zalo-daemon",
+    "test:all": "cargo test --workspace",
+    "build:all": "cargo build --release --workspace"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

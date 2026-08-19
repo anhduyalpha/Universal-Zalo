@@ -1,0 +1,22 @@
+[package]
+name = "zalo-crypto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+curve25519-dalek.workspace = true
+aes-gcm.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+zeroize.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"

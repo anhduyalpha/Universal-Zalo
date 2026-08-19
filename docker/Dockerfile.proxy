@@ -1,0 +1,34 @@
+# ==============================================================================
+# Multi-stage Dockerfile cho Rust SOCKS5 Proxy & Storage Engine
+# ==============================================================================
+FROM rust:1.79-bullseye as builder
+
+WORKDIR /usr/src/app
+
+# Cài đặt protobuf-compiler và openssl
+RUN apt-get update && apt-get install -y protobuf-compiler libssl-dev pkg-config cmake
+
+# Copy workspace
+COPY Cargo.toml ./
+COPY crates ./crates
+
+# Build release binaries
+RUN cargo build --release -p zalo-proxy -p zalo-daemon
+
+# Runtime container siêu nhẹ
+FROM debian:bullseye-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl1.1 \
+    libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/src/app/target/release/zalo-proxy /app/zalo-proxy
+COPY --from=builder /usr/src/app/target/release/zalo-daemon /app/zalo-daemon
+
+EXPOSE 9050
+
+CMD ["/app/zalo-proxy", "--port", "9050", "--cert-dir", "/app/certs"]

@@ -1,0 +1,15 @@
+[Unit]
+Description=Universal Zalo SOCKS5 MITM Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/universal-zalo
+ExecStart=/opt/universal-zalo/target/release/zalo-proxy --port 9050 --cert-dir /opt/universal-zalo/certs
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

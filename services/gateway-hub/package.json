@@ -1,0 +1,26 @@
+{
+  "name": "gateway-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "ioredis": "^5.4.1",
+    "bullmq": "^5.8.0",
+    "fastify": "^4.28.0",
+    "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.4.5",
+    "tsx": "^4.15.0"
+  }
+}

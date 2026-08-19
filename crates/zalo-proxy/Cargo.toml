@@ -1,0 +1,23 @@
+[package]
+name = "zalo-proxy"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+rcgen.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+httparse.workspace = true
+clap.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "crates/zalo-proxy",
+    "crates/zalo-proto",
+    "crates/zalo-crypto",
+    "crates/zalo-storage",
+    "crates/zalo-daemon",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Senior Systems Engineer"]
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2.1"
+rcgen = "0.13"
+tokio-tungstenite = "0.23"
+futures-util = "0.3"
+bytes = "1.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1.0"
+anyhow = "1.0"
+prost = "0.13"
+prost-types = "0.13"
+curve25519-dalek = "4.1"
+aes-gcm = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+zeroize = "1.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+parking_lot = "0.12"
+dashmap = "5.5"
+webpki-roots = "0.26"
+clap = { version = "4.5", features = ["derive"] }
+httparse = "1.9"
+rand = "0.8"
+rand_distr = "0.4"
