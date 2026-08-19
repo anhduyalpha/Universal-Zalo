@@ -118,8 +118,6 @@ async fn main() -> Result<()> {
                 TargetAddr::Ip(addr) => (addr.ip().to_string(), addr.port()),
             };
 
-            tracing::info!("Connecting target {}:{}", target_host, target_port);
-
             let mut target_stream = match TcpStream::connect(format!("{}:{}", target_host, target_port)).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -128,8 +126,10 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // MITM TLS & WebSocket Sniffing chỉ áp dụng cho zalo.me HTTPS (port 443)
-            if target_host.contains("zalo.me") && target_port == 443 {
+            // MITM TLS & WebSocket Sniffing áp dụng cho chat.zalo.me / wpa.zalo.me HTTPS (port 443)
+            let is_zalo_core = (target_host == "chat.zalo.me" || target_host.starts_with("wpa.zalo.me")) && target_port == 443;
+
+            if is_zalo_core {
                 if let Ok(server_config) = ca.generate_server_config(&target_host) {
                     let acceptor = TlsAcceptor::from(server_config);
                     if let Ok(mut tls_client) = acceptor.accept(client_stream).await {
@@ -143,7 +143,6 @@ async fn main() -> Result<()> {
 
                         if let Ok(server_name) = ServerName::try_from(target_host.as_str()) {
                             if let Ok(mut tls_server) = connector.connect(server_name.to_owned(), target_stream).await {
-                                // Đọc phần đầu của HTTP request để phân biệt WebSocket vs Regular HTTPS
                                 let mut initial_buf = [0u8; 4096];
                                 if let Ok(n) = tls_client.read(&mut initial_buf).await {
                                     if n > 0 {
@@ -151,11 +150,17 @@ async fn main() -> Result<()> {
                                         let is_websocket = req_str.to_ascii_lowercase().contains("upgrade: websocket");
 
                                         if is_websocket {
+                                            // Trích xuất path thực tế kèm query params (ví dụ: GET /ws/v2?token=... HTTP/1.1)
+                                            let req_line = req_str.lines().next().unwrap_or("");
+                                            let path = req_line.split_whitespace().nth(1).unwrap_or("/ws/");
+                                            let ws_target_url = format!("wss://{}{}", target_host, path);
+                                            tracing::info!("Interception WebSocket: {}", ws_target_url);
+
                                             let prefixed_client = PrefixedStream::new(initial_buf[..n].to_vec(), tls_client);
                                             if let (Ok(client_ws), Ok(server_ws)) = (
                                                 tokio_tungstenite::accept_async(prefixed_client).await,
                                                 tokio_tungstenite::client_async(
-                                                    format!("wss://{}/ws/", target_host),
+                                                    ws_target_url,
                                                     tls_server,
                                                 )
                                                 .await,
@@ -169,7 +174,7 @@ async fn main() -> Result<()> {
                                                 return;
                                             }
                                         } else {
-                                            // Regular HTTPS: gửi header ban đầu sang server và relay 2 chiều
+                                            // Regular HTTPS: forward header ban đầu và relay transparently
                                             if tls_server.write_all(&initial_buf[..n]).await.is_ok() && tls_server.flush().await.is_ok() {
                                                 let _ = tokio::io::copy_bidirectional(&mut tls_client, &mut tls_server).await;
                                                 return;
@@ -184,7 +189,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Mọi traffic thông thường khác (TCP Relay trong suốt)
+            // Mọi traffic thông thường khác (TCP Relay trong suốt không can thiệp TLS)
             let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut target_stream).await;
         });
     }

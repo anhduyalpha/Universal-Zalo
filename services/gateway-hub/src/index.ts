@@ -22,7 +22,6 @@ const hlc = new HybridLogicalClock();
 const connectedClients = new Set<WebSocket>();
 const streamingClients = new Set<WebSocket>();
 
-// Helper gửi HTTP request với custom Host header để bypass Chrome DevTools Host verification
 function getCdpJson(host: string, port: number, path: string): Promise<any> {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -59,7 +58,6 @@ function getCdpJson(host: string, port: number, path: string): Promise<any> {
   });
 }
 
-// Helper gửi lệnh CDP bất kỳ tới tab active của Chromium
 async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
   const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
   const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
@@ -132,7 +130,6 @@ async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
   });
 }
 
-// Khởi tạo Screencast Stream kết nối liên tục với Chromium CDP
 let screencastWs: WebSocket | null = null;
 
 async function ensureScreencastStream() {
@@ -223,7 +220,6 @@ async function ensureScreencastStream() {
   }
 }
 
-// Helper parse JSON body từ HTTP Request
 function parseBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -239,7 +235,6 @@ function parseBody(req: http.IncomingMessage): Promise<any> {
   });
 }
 
-// Khởi tạo HTTP Server
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -251,7 +246,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 1. Endpoint lấy ảnh màn hình Zalo chuẩn 1440x900 (`/qr` hoặc `/api/qr`)
+  // 1. Screenshot Endpoint (`/qr` hoặc `/api/qr`)
   if (req.url?.startsWith("/qr") || req.url?.startsWith("/api/qr")) {
     try {
       const result = await sendCdpCommand("Page.captureScreenshot", {
@@ -279,7 +274,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. Endpoint Click Chuột trực tiếp (`/api/action/click`)
+  // 2. Mouse Click (`/api/action/click`)
   if (req.url === "/api/action/click" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -311,7 +306,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. Endpoint Cuộn chuột trực tiếp (`/api/action/wheel`)
+  // 3. Mouse Wheel (`/api/action/wheel`)
   if (req.url === "/api/action/wheel" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -337,7 +332,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 4. Endpoint Gõ văn bản (`/api/action/type`)
+  // 4. Keyboard Type (`/api/action/type`)
   if (req.url === "/api/action/type" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -376,7 +371,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 5. Endpoint trích xuất danh sách hội thoại từ Zalo Web (`/api/conversations`)
+  // 5. Trích xuất danh sách hội thoại (`/api/conversations`)
   if (req.url === "/api/conversations" || req.url === "/conversations") {
     try {
       const script = `
@@ -421,19 +416,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 6. Endpoint kích hoạt Đồng bộ tin nhắn (`/api/sync`)
+  // 6. Kích hoạt Đồng bộ tin nhắn (`/api/sync`)
   if (req.url === "/api/sync" || req.url === "/sync") {
     try {
       const script = `
         (() => {
           const syncBtn = Array.from(document.querySelectorAll('a, button, span, div')).find(
-            el => el.textContent && (el.textContent.includes('Nhấn để đồng bộ ngay') || el.textContent.includes('đồng bộ ngay') || el.textContent.includes('Đồng bộ tin nhắn') || el.textContent.includes('Đồng bộ ngay'))
+            el => el.textContent && (el.textContent.includes('Nhấn để đồng bộ ngay') || el.textContent.includes('đồng bộ ngay') || el.textContent.includes('Đồng bộ tin nhắn') || el.textContent.includes('Thử lại'))
           );
           if (syncBtn) {
             syncBtn.click();
-            return { success: true, message: "Đã click nút 'Đồng bộ ngay' trên Zalo Web. Vui lòng mở điện thoại để xác nhận đồng bộ!" };
+            return { success: true, message: "Đã click nút Đồng bộ / Thử lại trên Zalo Web." };
           }
-          return { success: false, message: "Không tìm thấy nút đồng bộ (có thể đã đồng bộ xong)." };
+          return { success: false, message: "Không tìm thấy nút đồng bộ." };
         })()
       `;
       const result = await sendCdpCommand("Runtime.evaluate", {
@@ -451,7 +446,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 7. Health check
+  // 7. Bấm Hủy / Đóng Modal lỗi đồng bộ (`/api/dismiss-modal`)
+  if (req.url === "/api/dismiss-modal" || req.url === "/dismiss-modal") {
+    try {
+      const script = `
+        (() => {
+          const cancelBtn = Array.from(document.querySelectorAll('a, button, span, div')).find(
+            el => el.textContent && (el.textContent.trim() === 'Hủy' || el.textContent.trim() === 'Đóng' || el.textContent.includes('Bỏ qua'))
+          );
+          if (cancelBtn) {
+            cancelBtn.click();
+            return { success: true, message: "Đã bấm Hủy popup đồng bộ." };
+          }
+          return { success: false, message: "Không tìm thấy nút Hủy." };
+        })()
+      `;
+      const result = await sendCdpCommand("Runtime.evaluate", {
+        expression: script,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result?.result?.value || { success: false }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, message: e.message }));
+    }
+    return;
+  }
+
+  // 8. Health check
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "OK", activeClients: connectedClients.size }));
@@ -462,7 +487,6 @@ const server = http.createServer(async (req, res) => {
   res.end("Not Found");
 });
 
-// Khởi tạo WebSocket Server tích hợp trên HTTP Server
 const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws: WebSocket) => {
@@ -472,14 +496,12 @@ wss.on("connection", (ws: WebSocket) => {
     try {
       const msg: ClientMessage = JSON.parse(raw.toString("utf-8"));
 
-      // 1. Client yêu cầu xem Stream Screencast realtime 30 FPS
       if (msg.type === "START_STREAM") {
         streamingClients.add(ws);
         ensureScreencastStream();
         return;
       }
 
-      // 2. Client Click Chuột trực tiếp qua WebSocket (Zero Delay)
       if (msg.type === "CLICK" && msg.x !== undefined && msg.y !== undefined) {
         const clickX = Math.round(msg.x);
         const clickY = Math.round(msg.y);
@@ -519,7 +541,6 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      // 3. Client Cuộn Chuột (Mouse Wheel) trực tiếp qua WebSocket (Zero Delay)
       if (msg.type === "WHEEL" && msg.x !== undefined && msg.y !== undefined) {
         const wheelX = Math.round(msg.x);
         const wheelY = Math.round(msg.y);
@@ -540,7 +561,6 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      // 4. Client Gõ phím trực tiếp qua WebSocket (Zero Delay)
       if (msg.type === "TYPE" && msg.text) {
         try {
           if (screencastWs && screencastWs.readyState === WebSocket.OPEN) {
@@ -570,7 +590,6 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      // 5. Client Gửi tin nhắn qua giao diện Chat (PWA Fan-out & Realtime injection)
       if (msg.type === "SEND_MESSAGE") {
         if (!limiter.tryConsume(1)) {
           ws.send(

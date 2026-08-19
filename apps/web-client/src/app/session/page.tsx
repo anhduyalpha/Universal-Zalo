@@ -131,11 +131,22 @@ export default function SessionManagerPage() {
   };
 
   const handleTriggerSync = async () => {
-    setSyncStatus("Đang gửi lệnh kích hoạt đồng bộ tới Zalo Web...");
+    setSyncStatus("Đang gửi lệnh Thử lại đồng bộ tới Zalo Web...");
     try {
       const res = await fetch("/api/sync", { method: "POST" });
       const data = await res.json();
       setSyncStatus(data.message || "Đã gửi lệnh đồng bộ.");
+    } catch (e: any) {
+      setSyncStatus(`Lỗi: ${e.message}`);
+    }
+  };
+
+  const handleDismissModal = async () => {
+    setSyncStatus("Đang bấm Hủy để bỏ qua popup đồng bộ...");
+    try {
+      const res = await fetch("/api/dismiss-modal", { method: "POST" });
+      const data = await res.json();
+      setSyncStatus(data.message || "Đã bấm Hủy.");
     } catch (e: any) {
       setSyncStatus(`Lỗi: ${e.message}`);
     }
@@ -158,20 +169,26 @@ export default function SessionManagerPage() {
               onClick={handleTriggerSync}
               style={{ padding: "8px 16px", background: "#0284c7", color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
             >
-              ⚡ Click Tự động "Đồng bộ ngay"
+              🔄 Thử lại đồng bộ
+            </button>
+            <button
+              onClick={handleDismissModal}
+              style={{ padding: "8px 16px", background: "#475569", color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+            >
+              ❌ Bỏ qua / Click Hủy
             </button>
             <Link
               href="/"
               style={{ padding: "8px 18px", background: "#0068ff", color: "#fff", borderRadius: 8, textDecoration: "none", fontWeight: 600, fontSize: 13 }}
             >
-              💬 Quay lại Chat App
+              💬 Mở Chat App
             </Link>
           </div>
         </div>
 
         {/* Sync Instruction Guide */}
         <div style={{ background: "rgba(30, 41, 59, 0.8)", border: "1px solid #334155", padding: "12px 18px", borderRadius: 10, marginBottom: 12, fontSize: 13, color: "#cbd5e1" }}>
-          📱 <b>Mẹo Đồng bộ Tin nhắn:</b> Khi bấm <i>"Đồng bộ ngay"</i>, hãy <b>mở ứng dụng Zalo trên điện thoại của bạn</b> (mở khóa màn hình) và giữ ứng dụng chạy để điện thoại chấp nhận đẩy dữ liệu lịch sử tin nhắn sang máy tính.
+          💡 <b>Gợi ý:</b> Nếu bạn muốn vào thẳng giao diện chat mà không cần đồng bộ lại tin nhắn cũ từ điện thoại, bạn có thể click vào chữ <b>"Hủy"</b> trên màn hình hoặc bấm nút <b>"❌ Bỏ qua / Click Hủy"</b> ở trên. Tin nhắn mới phát sinh từ giờ trở đi vẫn nhận và gửi realtime bình thường!
         </div>
 
         {/* Input Bar */}
@@ -200,7 +217,7 @@ export default function SessionManagerPage() {
         {/* Real-time Canvas Display (Desktop Standard 1440x900 với Cuộn Chuột Wheel) */}
         <div style={{ background: "#000000", borderRadius: 12, overflow: "hidden", border: "1px solid #334155", boxShadow: "0 8px 32px rgba(0,0,0,0.5)", position: "relative" }}>
           <div style={{ padding: "8px 14px", background: "#1e293b", fontSize: 12, color: "#94a3b8", display: "flex", justifyContent: "space-between" }}>
-            <span>🖱️ <b>Tương tác Đầy đủ:</b> Click chuột và lăn con cuộn chuột (Scroll Wheel) trực tiếp trên màn hình Zalo.</span>
+            <span>🖱️ <b>Tương tác Đầy đủ:</b> Click chuột vào nút <b>Thử lại</b> hoặc <b>Hủy</b> trên màn hình.</span>
             <span>Tỉ lệ chuẩn 1440 x 900</span>
           </div>
 
