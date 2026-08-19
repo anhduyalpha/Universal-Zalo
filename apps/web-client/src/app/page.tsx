@@ -25,12 +25,11 @@ export default function ZaloMultiDeviceApp() {
     [activeConvId]
   ) || [];
 
-  // Tự động cuộn xuống cuối khi có tin nhắn mới
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeMessages]);
 
-  // Đồng bộ danh sách hội thoại từ Chromium Master Session
+  // Đồng bộ danh sách hội thoại từ Server Volume & Chromium
   const fetchLiveConversations = async () => {
     try {
       const res = await fetch("/api/conversations");
@@ -49,6 +48,36 @@ export default function ZaloMultiDeviceApp() {
       console.warn("Failed to fetch live conversations:", e);
     }
   };
+
+  // Tải toàn bộ tin nhắn & Media đã lưu trên Server Volume cho cuộc hội thoại hiện tại
+  const fetchServerMessages = async (convId: string) => {
+    try {
+      const res = await fetch(`/api/messages?conversationId=${convId}`);
+      if (res.ok) {
+        const msgs: LocalMessage[] = await res.json();
+        if (msgs && msgs.length > 0) {
+          for (const msg of msgs) {
+            await db.messages.put({
+              msgId: msg.msgId,
+              conversationId: msg.conversationId || convId,
+              textContent: msg.textContent,
+              sender: msg.sender,
+              status: msg.status || "DELIVERED",
+              timestamp: msg.timestamp,
+              type: msg.type || "TEXT",
+              mediaUrl: msg.mediaUrl,
+            });
+          }
+        }
+      }
+    } catch (e) {}
+  };
+
+  useEffect(() => {
+    if (activeConvId) {
+      fetchServerMessages(activeConvId);
+    }
+  }, [activeConvId]);
 
   // Khởi tạo và kết nối WebSocket Gateway
   useEffect(() => {
@@ -73,14 +102,15 @@ export default function ZaloMultiDeviceApp() {
               msgId: data.msgId,
               conversationId: convId,
               textContent: data.textContent,
-              sender: "OTHER",
+              sender: data.sender || "OTHER",
               status: "DELIVERED",
               timestamp: data.hlc?.physicalTime || Date.now(),
-              type: "TEXT",
+              type: data.type || "TEXT",
+              mediaUrl: data.mediaUrl,
             });
 
             await db.conversations.update(convId, {
-              lastMessage: data.textContent,
+              lastMessage: data.textContent || `[${data.type || "Media"}]`,
               lastTimestamp: Date.now(),
             });
           }
@@ -200,7 +230,7 @@ export default function ZaloMultiDeviceApp() {
         </div>
       </div>
 
-      {/* 2. Cột Danh Sách Hội Thoại với Cuộn Mượt (Scrollable Sidebar) */}
+      {/* 2. Cột Danh Sách Hội Thoại với Cuộn Mượt */}
       <div style={{ width: 340, background: "#ffffff", borderRight: "1px solid #e5e7eb", display: "flex", flexDirection: "column", flexShrink: 0, height: "100%" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid #f1f5f9", flexShrink: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -229,11 +259,10 @@ export default function ZaloMultiDeviceApp() {
           </div>
         )}
 
-        {/* Danh sách các cuộc trò chuyện có thanh cuộn mượt */}
         <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           {filteredConversations.length === 0 ? (
             <div style={{ textAlign: "center", padding: "40px 20px", color: "#94a3b8", fontSize: 14 }}>
-              Đang tải danh sách hội thoại từ Zalo...
+              Đang tải danh sách hội thoại từ Server...
             </div>
           ) : (
             filteredConversations.map((conv) => {
@@ -281,7 +310,7 @@ export default function ZaloMultiDeviceApp() {
         </div>
       </div>
 
-      {/* 3. Khung Chat Chính (Main Chat Area với Cuộn Tin Nhắn) */}
+      {/* 3. Khung Chat Chính (Main Chat Area) */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#ffffff", height: "100%", minWidth: 0 }}>
         {/* Chat Header */}
         <div style={{ height: 64, padding: "0 24px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff", flexShrink: 0 }}>
@@ -296,7 +325,7 @@ export default function ZaloMultiDeviceApp() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b" }}>{currentActiveConv.name}</div>
                 <div style={{ fontSize: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}>
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981" }}></span>
-                  Đang hoạt động (Sub-Client Multi-Device)
+                  Đang hoạt động (Lưu vĩnh viễn trên Server Volume)
                 </div>
               </div>
             </div>
@@ -320,7 +349,7 @@ export default function ZaloMultiDeviceApp() {
           </div>
         </div>
 
-        {/* Messages Stream View có thanh cuộn mượt (Scrollable Messages Area) */}
+        {/* Messages Stream View hỗ trợ hiển thị Media (Ảnh, Video, Audio) */}
         <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc", minHeight: 0 }}>
           {activeMessages.length === 0 ? (
             <div style={{ margin: "auto", textAlign: "center", color: "#94a3b8" }}>
@@ -344,7 +373,30 @@ export default function ZaloMultiDeviceApp() {
                   boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
                 }}
               >
-                <div style={{ fontSize: 14, lineHeight: 1.5, wordBreak: "break-word" }}>{m.textContent}</div>
+                {/* Media Content (Ảnh / Video / Audio) */}
+                {m.mediaUrl && m.type === "IMAGE" && (
+                  <img
+                    src={m.mediaUrl}
+                    alt="Media Attachment"
+                    style={{ maxWidth: "100%", maxHeight: 260, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain" }}
+                  />
+                )}
+                {m.mediaUrl && m.type === "VIDEO" && (
+                  <video
+                    controls
+                    src={m.mediaUrl}
+                    style={{ maxWidth: "100%", maxHeight: 260, borderRadius: 8, marginBottom: 6, display: "block" }}
+                  />
+                )}
+                {m.mediaUrl && m.type === "VOICE" && (
+                  <audio controls src={m.mediaUrl} style={{ width: "100%", marginBottom: 6 }} />
+                )}
+
+                {/* Text Content */}
+                {m.textContent && (
+                  <div style={{ fontSize: 14, lineHeight: 1.5, wordBreak: "break-word" }}>{m.textContent}</div>
+                )}
+
                 <div style={{ fontSize: 10, color: m.sender === "ME" ? "rgba(255,255,255,0.75)" : "#94a3b8", marginTop: 4, textAlign: "right" }}>
                   {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {m.sender === "ME" && (m.status === "SENDING" ? "⏳" : "✓✓")}
                 </div>

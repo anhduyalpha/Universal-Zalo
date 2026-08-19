@@ -67,6 +67,9 @@ services:
       - zalo-proxy
     ports:
       - "0.0.0.0:8080:8080"
+    volumes:
+      - storage_data:/app/data
+      - media_data:/app/data/media
     networks:
       - zalo_internal
 
@@ -92,4 +95,5 @@ volumes:
   pg_data:
   certs_data:
   storage_data:
+  media_data:
   chrome_profile:
