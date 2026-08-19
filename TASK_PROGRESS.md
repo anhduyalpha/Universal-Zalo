@@ -27,3 +27,8 @@
 - [x] Task 4.3: Multi-Tier Token Bucket Limiter & Thread Sharded Queue (`services/gateway-hub/src/token_bucket.ts`)
 - [x] Task 4.4: Hybrid Logical Clock (HLC) Timeline Ordering (`services/gateway-hub/src/hlc.ts`)
 - [x] Task 4.5: Next.js PWA Client với Dexie.js Offline Cache (`apps/web-client/src/app/page.tsx`, `dexie_db.ts`)
+- [x] Task 4.6: Conversation Sidebar & Multi-Room State Management (`apps/web-client/src/components/ConversationSidebar.tsx`)
+- [x] Task 4.7: Media, File, Voice Waveform & Zalo Animated Sticker Engine (`apps/web-client/src/components/MediaViewer.tsx`, `VoicePlayer.tsx`, `StickerPicker.tsx`)
+- [x] Task 4.8: PWA Service Worker & Web Push Notifications System (`apps/web-client/public/sw.js`, `apps/web-client/src/lib/push_manager.ts`, `/api/push/subscribe`, `/api/push/send`)
+- [x] Task 4.9: Audio Feedback Synthesizer & Mobile-First Native PWA Experience (`apps/web-client/src/lib/sound_effects.ts`, `apps/web-client/src/components/SettingsModal.tsx`, `manifest.json`)
+

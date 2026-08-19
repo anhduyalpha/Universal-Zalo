@@ -5,6 +5,7 @@ node_modules/
 certs/*.key
 certs/*.crt
 dist/
+.next/
 .env.local
 .DS_Store
 Thumbs.db
