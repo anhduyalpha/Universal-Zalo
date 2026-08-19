@@ -10,6 +10,8 @@ export default function ChatDashboard() {
   const [wsStatus, setWsStatus] = useState<"CONNECTED" | "DISCONNECTED" | "CONNECTING">("CONNECTING");
   const [showQrModal, setShowQrModal] = useState(false);
   const [qrTimestamp, setQrTimestamp] = useState(Date.now());
+  const [qrLoading, setQrLoading] = useState(true);
+  const [qrError, setQrError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const messages = useLiveQuery(() => db.messages.orderBy("timestamp").toArray(), []) || [];
@@ -53,6 +55,12 @@ export default function ChatDashboard() {
       };
     }
   }, []);
+
+  const refreshQr = () => {
+    setQrLoading(true);
+    setQrError(null);
+    setQrTimestamp(Date.now());
+  };
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -98,7 +106,7 @@ export default function ChatDashboard() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <button
             onClick={() => {
-              setQrTimestamp(Date.now());
+              refreshQr();
               setShowQrModal(true);
             }}
             style={{ padding: "6px 14px", background: "#ffffff", color: "#0068ff", border: "none", borderRadius: 18, fontWeight: 600, fontSize: 13, cursor: "pointer", boxShadow: "0 2px 4px rgba(0,0,0,0.1)" }}
@@ -114,26 +122,43 @@ export default function ChatDashboard() {
       {/* QR Modal */}
       {showQrModal && (
         <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, backdropFilter: "blur(4px)" }}>
-          <div style={{ background: "#fff", padding: 24, borderRadius: 16, width: 440, maxWidth: "90%", textAlign: "center", boxShadow: "0 10px 25px rgba(0,0,0,0.2)" }}>
+          <div style={{ background: "#fff", padding: 24, borderRadius: 16, width: 480, maxWidth: "90%", textAlign: "center", boxShadow: "0 10px 25px rgba(0,0,0,0.2)" }}>
             <h3 style={{ margin: "0 0 10px 0", color: "#1f2937", fontSize: 18 }}>Quét mã QR để Đăng nhập Zalo</h3>
             <p style={{ margin: "0 0 16px 0", fontSize: 13, color: "#6b7280" }}>
               Mở ứng dụng Zalo trên điện thoại $\rightarrow$ Chọn biểu tượng Quét mã QR trên đầu màn hình.
             </p>
 
-            <div style={{ minHeight: 280, display: "flex", alignItems: "center", justifyContent: "center", background: "#f9fafb", borderRadius: 12, overflow: "hidden", border: "1px solid #e5e7eb" }}>
+            <div style={{ minHeight: 300, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#f9fafb", borderRadius: 12, overflow: "hidden", border: "1px solid #e5e7eb", position: "relative" }}>
+              {qrLoading && (
+                <div style={{ padding: 20, color: "#0068ff", fontSize: 14, fontWeight: 500 }}>
+                  ⏳ Đang tải ảnh mã QR từ Server...
+                </div>
+              )}
+              {qrError && (
+                <div style={{ padding: 20, color: "#ef4444", fontSize: 13 }}>
+                  ⚠️ {qrError}
+                  <br />
+                  <small style={{ color: "#6b7280" }}>Hãy kiểm tra xem container zalo-chromium đã khởi động xong chưa.</small>
+                </div>
+              )}
               <img
                 src={`http://${hubHost}:8080/qr?t=${qrTimestamp}`}
                 alt="Zalo QR Code Live"
-                style={{ width: "100%", height: "auto", display: "block" }}
-                onError={(e) => {
-                  (e.target as HTMLElement).style.display = "none";
+                style={{ width: "100%", height: "auto", display: qrError ? "none" : "block" }}
+                onLoad={() => {
+                  setQrLoading(false);
+                  setQrError(null);
+                }}
+                onError={() => {
+                  setQrLoading(false);
+                  setQrError(`Không thể kết nối đến http://${hubHost}:8080/qr`);
                 }}
               />
             </div>
 
             <div style={{ marginTop: 18, display: "flex", gap: 10, justifyContent: "center" }}>
               <button
-                onClick={() => setQrTimestamp(Date.now())}
+                onClick={refreshQr}
                 style={{ padding: "8px 18px", background: "#f3f4f6", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer" }}
               >
                 🔄 Làm mới ảnh

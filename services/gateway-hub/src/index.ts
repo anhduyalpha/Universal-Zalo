@@ -32,14 +32,17 @@ const server = http.createServer(async (req, res) => {
   if (req.url?.startsWith("/qr") || req.url?.startsWith("/api/qr")) {
     try {
       const cdpHost = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
-      const targetRes = await fetch(`http://${cdpHost}/json`);
+      const targetRes = await fetch(`http://${cdpHost}/json`, {
+        headers: { Host: "localhost" },
+      });
+
       if (!targetRes.ok) {
         res.writeHead(502, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Không thể kết nối đến Chromium CDP trên server." }));
         return;
       }
 
-      const targets = (await targetRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+      const targets = (await targetRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string; id?: string }>;
       const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
 
       if (!pageTarget || !pageTarget.webSocketDebuggerUrl) {
@@ -48,8 +51,22 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // THAY THẾ hostname 127.0.0.1 / localhost trong webSocketDebuggerUrl bằng cdpHost
+      let wsUrl = pageTarget.webSocketDebuggerUrl;
+      wsUrl = wsUrl.replace(/^ws:\/\/[^/]+/, `ws://${cdpHost}`);
+
       // Kết nối CDP WebSocket để chụp màn hình
-      const cdpWs = new WebSocket(pageTarget.webSocketDebuggerUrl);
+      const cdpWs = new WebSocket(wsUrl);
+      let responded = false;
+
+      const timeoutId = setTimeout(() => {
+        if (!responded) {
+          responded = true;
+          try { cdpWs.close(); } catch {}
+          res.writeHead(504, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Quá thời gian chụp màn hình từ Chromium (Timeout)." }));
+        }
+      }, 6000);
 
       cdpWs.on("open", () => {
         cdpWs.send(
@@ -62,9 +79,12 @@ const server = http.createServer(async (req, res) => {
       });
 
       cdpWs.on("message", (raw) => {
+        if (responded) return;
         try {
           const resp = JSON.parse(raw.toString());
           if (resp.id === 100 && resp.result?.data) {
+            responded = true;
+            clearTimeout(timeoutId);
             const imgBuffer = Buffer.from(resp.result.data, "base64");
             res.writeHead(200, {
               "Content-Type": "image/png",
@@ -72,18 +92,26 @@ const server = http.createServer(async (req, res) => {
               "Cache-Control": "no-store, no-cache, must-revalidate",
             });
             res.end(imgBuffer);
-            cdpWs.close();
+            try { cdpWs.close(); } catch {}
           }
         } catch (e) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Lỗi xử lý frame ảnh từ CDP." }));
-          cdpWs.close();
+          if (!responded) {
+            responded = true;
+            clearTimeout(timeoutId);
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Lỗi xử lý frame ảnh từ CDP." }));
+            try { cdpWs.close(); } catch {}
+          }
         }
       });
 
       cdpWs.on("error", (err) => {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: `Lỗi kết nối CDP: ${err.message}` }));
+        if (!responded) {
+          responded = true;
+          clearTimeout(timeoutId);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Lỗi kết nối CDP WebSocket (${wsUrl}): ${err.message}` }));
+        }
       });
     } catch (error: any) {
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -168,7 +196,7 @@ wss.on("connection", (ws: WebSocket) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
   console.log(`📷 Live QR Screenshot endpoint ready at http://0.0.0.0:${PORT}/qr`);
 });
