@@ -3,8 +3,6 @@ services:
     image: redis:7-alpine
     container_name: universal_zalo_redis
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -19,8 +17,6 @@ services:
       POSTGRES_USER: zalo_admin
       POSTGRES_PASSWORD: zalo_secure_password
       POSTGRES_DB: universal_zalo
-    ports:
-      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     networks:
