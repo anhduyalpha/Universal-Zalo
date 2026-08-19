@@ -5,16 +5,20 @@ import { HybridLogicalClock } from "./hlc.js";
 import { nanoid } from "nanoid";
 
 interface ClientMessage {
-  type: "SEND_MESSAGE" | "PING";
+  type: "SEND_MESSAGE" | "PING" | "CLICK" | "TYPE" | "START_STREAM";
   conversationId?: string;
   textContent?: string;
   idempotencyKey?: string;
+  x?: number;
+  y?: number;
+  text?: string;
 }
 
 const PORT = 8080;
 const limiter = new TokenBucketLimiter(10, 4);
 const hlc = new HybridLogicalClock();
 const connectedClients = new Set<WebSocket>();
+const streamingClients = new Set<WebSocket>();
 
 // Helper gửi HTTP request với custom Host header để bypass Chrome DevTools Host verification
 function getCdpJson(host: string, port: number, path: string): Promise<any> {
@@ -82,6 +86,20 @@ async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
     const cmdId = Math.floor(Math.random() * 100000);
 
     ws.on("open", () => {
+      // Đảm bảo độ phân giải chuẩn Desktop 1440x900
+      ws.send(
+        JSON.stringify({
+          id: 1,
+          method: "Emulation.setDeviceMetricsOverride",
+          params: {
+            width: 1440,
+            height: 900,
+            deviceScaleFactor: 1,
+            mobile: false,
+          },
+        })
+      );
+
       ws.send(
         JSON.stringify({
           id: cmdId,
@@ -113,6 +131,101 @@ async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
   });
 }
 
+// Khởi tạo Screencast Stream kết nối liên tục với Chromium CDP
+let screencastWs: WebSocket | null = null;
+
+async function ensureScreencastStream() {
+  if (screencastWs && screencastWs.readyState === WebSocket.OPEN) return;
+
+  try {
+    const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
+    const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
+    const cdpPort = parseInt(cdpPortStr || "9222", 10);
+
+    const targets = await getCdpJson(cdpHost, cdpPort, "/json");
+    const pageTarget = targets.find((t: any) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
+
+    if (!pageTarget || !pageTarget.webSocketDebuggerUrl) return;
+
+    let wsUrl = pageTarget.webSocketDebuggerUrl as string;
+    wsUrl = wsUrl.replace(/^ws:\/\/[^/]+/, `ws://${cdpHost}:${cdpPort}`);
+
+    screencastWs = new WebSocket(wsUrl, {
+      headers: { Host: `localhost:${cdpPort}` },
+    });
+
+    screencastWs.on("open", () => {
+      // 1. Khóa kích thước Desktop 1440x900
+      screencastWs?.send(
+        JSON.stringify({
+          id: 10,
+          method: "Emulation.setDeviceMetricsOverride",
+          params: { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
+        })
+      );
+
+      // 2. Bắt đầu Stream video Screencast 30 FPS chất lượng cao
+      screencastWs?.send(
+        JSON.stringify({
+          id: 11,
+          method: "Page.startScreencast",
+          params: {
+            format: "jpeg",
+            quality: 85,
+            maxWidth: 1440,
+            maxHeight: 900,
+            everyNthFrame: 1,
+          },
+        })
+      );
+    });
+
+    screencastWs.on("message", (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.method === "Page.screencastFrame" && msg.params?.data) {
+          const sessionId = msg.params.sessionId;
+
+          // ACK frame về cho Chromium để nhận frame tiếp theo
+          screencastWs?.send(
+            JSON.stringify({
+              id: 12,
+              method: "Page.screencastFrameAck",
+              params: { sessionId },
+            })
+          );
+
+          // Phát realtime frame hình ảnh (Base64 JPEG) xuống toàn bộ client đang xem stream
+          const framePayload = JSON.stringify({
+            event: "SCREENCAST_FRAME",
+            data: msg.params.data,
+            timestamp: Date.now(),
+          });
+
+          for (const client of streamingClients) {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(framePayload);
+            }
+          }
+        }
+      } catch (e) {}
+    });
+
+    screencastWs.on("close", () => {
+      screencastWs = null;
+      if (streamingClients.size > 0) {
+        setTimeout(ensureScreencastStream, 1000);
+      }
+    });
+
+    screencastWs.on("error", () => {
+      screencastWs = null;
+    });
+  } catch (e) {
+    screencastWs = null;
+  }
+}
+
 // Helper parse JSON body từ HTTP Request
 function parseBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -131,7 +244,6 @@ function parseBody(req: http.IncomingMessage): Promise<any> {
 
 // Khởi tạo HTTP Server
 const server = http.createServer(async (req, res) => {
-  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -142,10 +254,15 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 1. Endpoint lấy ảnh màn hình Zalo (`/qr` hoặc `/api/qr`)
+  // 1. Endpoint lấy ảnh màn hình Zalo chuẩn 1440x900 (`/qr` hoặc `/api/qr`)
   if (req.url?.startsWith("/qr") || req.url?.startsWith("/api/qr")) {
     try {
-      const result = await sendCdpCommand("Page.captureScreenshot", { format: "png", quality: 90 });
+      const result = await sendCdpCommand("Page.captureScreenshot", {
+        format: "png",
+        quality: 90,
+        captureBeyondViewport: false,
+      });
+
       if (result?.data) {
         const imgBuffer = Buffer.from(result.data, "base64");
         res.writeHead(200, {
@@ -165,14 +282,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. Endpoint Tương tác Chuột (Mouse Click) trực tiếp vào Chromium (`/api/action/click`)
+  // 2. Endpoint Click Chuột trực tiếp (`/api/action/click`)
   if (req.url === "/api/action/click" && req.method === "POST") {
     try {
       const body = await parseBody(req);
       const x = Math.round(Number(body.x) || 0);
       const y = Math.round(Number(body.y) || 0);
 
-      // Gửi mousePressed rồi mouseReleased
       await sendCdpCommand("Input.dispatchMouseEvent", {
         type: "mousePressed",
         button: "left",
@@ -198,7 +314,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. Endpoint Gõ văn bản / Gửi tin nhắn thực tế qua Chromium (`/api/action/type`)
+  // 3. Endpoint Gõ văn bản (`/api/action/type`)
   if (req.url === "/api/action/type" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -206,11 +322,9 @@ const server = http.createServer(async (req, res) => {
       const pressEnter = Boolean(body.pressEnter !== false);
 
       if (text) {
-        // Nhập văn bản qua Input.insertText
         await sendCdpCommand("Input.insertText", { text: text });
 
         if (pressEnter) {
-          // Nhấn Enter
           await sendCdpCommand("Input.dispatchKeyEvent", {
             type: "rawKeyDown",
             key: "Enter",
@@ -249,6 +363,7 @@ const server = http.createServer(async (req, res) => {
           convElements.forEach((el, idx) => {
             const nameEl = el.querySelector('.conv-item-title__name, .name, [class*="name"], [class*="title"], span[title]');
             const msgEl = el.querySelector('.conv-message, .msg, [class*="message"], [class*="last-msg"], [class*="truncate"]');
+            const timeEl = el.querySelector('.time, [class*="time"]');
             const imgEl = el.querySelector('img');
             
             const name = nameEl ? nameEl.textContent.trim() : (el.getAttribute('title') || "");
@@ -290,11 +405,11 @@ const server = http.createServer(async (req, res) => {
       const script = `
         (() => {
           const syncBtn = Array.from(document.querySelectorAll('a, button, span, div')).find(
-            el => el.textContent && (el.textContent.includes('Nhấn để đồng bộ ngay') || el.textContent.includes('đồng bộ ngay') || el.textContent.includes('Đồng bộ tin nhắn'))
+            el => el.textContent && (el.textContent.includes('Nhấn để đồng bộ ngay') || el.textContent.includes('đồng bộ ngay') || el.textContent.includes('Đồng bộ tin nhắn') || el.textContent.includes('Đồng bộ ngay'))
           );
           if (syncBtn) {
             syncBtn.click();
-            return { success: true, message: "Đã click nút 'Nhấn để đồng bộ ngay' trên Zalo Web." };
+            return { success: true, message: "Đã click nút 'Đồng bộ ngay' trên Zalo Web." };
           }
           return { success: false, message: "Không tìm thấy nút đồng bộ (có thể đã đồng bộ xong)." };
         })()
@@ -330,12 +445,89 @@ const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws: WebSocket) => {
   connectedClients.add(ws);
-  console.log(`Client connected. Total active sub-clients: ${connectedClients.size}`);
 
   ws.on("message", async (raw: Buffer) => {
     try {
       const msg: ClientMessage = JSON.parse(raw.toString("utf-8"));
 
+      // 1. Client yêu cầu xem Stream Screencast realtime 30 FPS
+      if (msg.type === "START_STREAM") {
+        streamingClients.add(ws);
+        ensureScreencastStream();
+        return;
+      }
+
+      // 2. Client Click Chuột trực tiếp qua WebSocket (Zero Delay)
+      if (msg.type === "CLICK" && msg.x !== undefined && msg.y !== undefined) {
+        const clickX = Math.round(msg.x);
+        const clickY = Math.round(msg.y);
+        try {
+          if (screencastWs && screencastWs.readyState === WebSocket.OPEN) {
+            screencastWs.send(
+              JSON.stringify({
+                id: 101,
+                method: "Input.dispatchMouseEvent",
+                params: { type: "mousePressed", button: "left", clickCount: 1, x: clickX, y: clickY },
+              })
+            );
+            screencastWs.send(
+              JSON.stringify({
+                id: 102,
+                method: "Input.dispatchMouseEvent",
+                params: { type: "mouseReleased", button: "left", clickCount: 1, x: clickX, y: clickY },
+              })
+            );
+          } else {
+            await sendCdpCommand("Input.dispatchMouseEvent", {
+              type: "mousePressed",
+              button: "left",
+              clickCount: 1,
+              x: clickX,
+              y: clickY,
+            });
+            await sendCdpCommand("Input.dispatchMouseEvent", {
+              type: "mouseReleased",
+              button: "left",
+              clickCount: 1,
+              x: clickX,
+              y: clickY,
+            });
+          }
+        } catch (err) {}
+        return;
+      }
+
+      // 3. Client Gõ phím trực tiếp qua WebSocket (Zero Delay)
+      if (msg.type === "TYPE" && msg.text) {
+        try {
+          if (screencastWs && screencastWs.readyState === WebSocket.OPEN) {
+            screencastWs.send(
+              JSON.stringify({
+                id: 103,
+                method: "Input.insertText",
+                params: { text: msg.text },
+              })
+            );
+            screencastWs.send(
+              JSON.stringify({
+                id: 104,
+                method: "Input.dispatchKeyEvent",
+                params: { type: "rawKeyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
+              })
+            );
+            screencastWs.send(
+              JSON.stringify({
+                id: 105,
+                method: "Input.dispatchKeyEvent",
+                params: { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
+              })
+            );
+          }
+        } catch (err) {}
+        return;
+      }
+
+      // 4. Client Gửi tin nhắn qua giao diện Chat (PWA Fan-out & Realtime injection)
       if (msg.type === "SEND_MESSAGE") {
         if (!limiter.tryConsume(1)) {
           ws.send(
@@ -351,7 +543,6 @@ wss.on("connection", (ws: WebSocket) => {
         const msgId = nanoid();
         const ts = hlc.now();
 
-        // 1. Optimistic ACK tức thì cho client gửi
         ws.send(
           JSON.stringify({
             status: "OPTIMISTIC_PENDING",
@@ -361,7 +552,6 @@ wss.on("connection", (ws: WebSocket) => {
           })
         );
 
-        // 2. Broadcast ngay lập tức (Fan-out) xuống các Sub-Clients khác
         const broadcastPayload = JSON.stringify({
           event: "MESSAGE_FANOUT",
           msgId,
@@ -377,10 +567,8 @@ wss.on("connection", (ws: WebSocket) => {
           }
         }
 
-        // 3. TỰ ĐỘNG GỬI TIN NHẮN THẬT VÀO CHROMIUM ZALO WEB QUA CDP
         if (msg.textContent) {
           try {
-            // Tự động gõ text và bấm Enter vào khung chat đang mở của Zalo Web
             await sendCdpCommand("Input.insertText", { text: msg.textContent });
             await sendCdpCommand("Input.dispatchKeyEvent", {
               type: "rawKeyDown",
@@ -398,27 +586,21 @@ wss.on("connection", (ws: WebSocket) => {
               windowsVirtualKeyCode: 13,
               nativeVirtualKeyCode: 13,
             });
-            console.log(`[CDP Auto-Send] Sent message to real Zalo Web: ${msg.textContent}`);
-          } catch (cdpErr) {
-            console.warn(`[CDP Auto-Send Warning] Could not inject text into Chromium:`, cdpErr);
-          }
+          } catch (cdpErr) {}
         }
       } else if (msg.type === "PING") {
         ws.send(JSON.stringify({ type: "PONG", timestamp: Date.now() }));
       }
-    } catch (err) {
-      console.error("Invalid frame received from client:", err);
-    }
+    } catch (err) {}
   });
 
   ws.on("close", () => {
     connectedClients.delete(ws);
-    console.log(`Client disconnected. Total active sub-clients: ${connectedClients.size}`);
+    streamingClients.delete(ws);
   });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
-  console.log(`📷 Live QR Screenshot endpoint ready at http://0.0.0.0:${PORT}/qr`);
-  console.log(`🖱️ Interactive CDP Mouse & Keyboard API ready at /api/action/click and /api/action/type`);
+  console.log(`🎥 30 FPS Zero-Delay Screencast Engine initialized`);
 });

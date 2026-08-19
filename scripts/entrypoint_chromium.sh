@@ -16,7 +16,7 @@ rm -f /app/profile/SingletonLock /app/profile/SingletonCookie /app/profile/Singl
 echo "🌐 Bật socat port forwarder 0.0.0.0:9222 -> 127.0.0.1:9223..."
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
 
-echo "🌐 Khởi chạy Chromium Headless kết nối qua $PROXY_SERVER..."
+echo "🌐 Khởi chạy Chromium Headless (Chuẩn Desktop 1440x900) kết nối qua $PROXY_SERVER..."
 exec chromium \
   --proxy-server="$PROXY_SERVER" \
   --user-data-dir="/app/profile" \
@@ -25,6 +25,9 @@ exec chromium \
   --disable-setuid-sandbox \
   --disable-dev-shm-usage \
   --disable-gpu \
+  --window-size=1440,900 \
+  --force-device-scale-factor=1 \
+  --high-dpi-support=1 \
   --disable-background-timer-throttling \
   --disable-backgrounding-occluded-windows \
   --disable-renderer-backgrounding \
