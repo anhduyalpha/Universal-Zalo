@@ -15,6 +15,9 @@ mkdir -p "$HOME/.pki/nssdb"
 certutil -d sql:$HOME/.pki/nssdb -N --empty-password || true
 certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Universal Zalo Root CA" -i "$CERT_PATH"
 
+echo "🌐 Bật socat port forwarder 0.0.0.0:9222 -> 127.0.0.1:9223..."
+socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
+
 echo "🌐 Khởi chạy Chromium Headless kết nối qua $PROXY_SERVER..."
 exec chromium \
   --proxy-server="$PROXY_SERVER" \
@@ -32,8 +35,7 @@ exec chromium \
   --autoplay-policy=no-user-gesture-required \
   --no-first-run \
   --no-default-browser-check \
-  --remote-debugging-port=9222 \
-  --remote-debugging-address=0.0.0.0 \
+  --remote-debugging-port=9223 \
   --remote-allow-origins=* \
   --ignore-certificate-errors \
   --allow-running-insecure-content \
