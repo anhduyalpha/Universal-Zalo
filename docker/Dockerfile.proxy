@@ -12,7 +12,8 @@ RUN apt-get update && apt-get install -y protobuf-compiler libssl-dev pkg-config
 COPY Cargo.toml ./
 COPY crates ./crates
 
-# Build release binaries
+# Fix MSRV cho time crate và build release binaries
+RUN cargo update -p time --precise 0.3.36 || true
 RUN cargo build --release -p zalo-proxy -p zalo-daemon
 
 # Runtime container siêu nhẹ trên Debian Bookworm
