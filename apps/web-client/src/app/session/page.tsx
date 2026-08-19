@@ -23,7 +23,6 @@ export default function SessionManagerPage() {
 
       ws.onopen = () => {
         setStreamConnected(true);
-        // Yêu cầu kích hoạt luồng Screencast video
         ws.send(JSON.stringify({ type: "START_STREAM" }));
       };
 
@@ -51,7 +50,6 @@ export default function SessionManagerPage() {
         } catch (e) {}
       };
 
-      // Đo FPS realtime
       const fpsTimer = setInterval(() => {
         setFps(frameCountRef.current);
         frameCountRef.current = 0;
@@ -64,13 +62,12 @@ export default function SessionManagerPage() {
     }
   }, []);
 
-  // Xử lý Click Chuột Zero-Delay trực tiếp qua WebSocket
+  // Xử lý Click Chuột Zero-Delay
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const rect = canvas.getBoundingClientRect();
-    // Tỉ lệ tọa độ thực tế so với canvas độ phân giải chuẩn (1440 x 900)
     const scaleX = 1440 / rect.width;
     const scaleY = 900 / rect.height;
 
@@ -78,7 +75,7 @@ export default function SessionManagerPage() {
     const clickY = Math.round((e.clientY - rect.top) * scaleY);
 
     setLastClickPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-    setSyncStatus(`⚡ Đã click vào tọa độ (${clickX}, ${clickY}) - Phản hồi tức thì!`);
+    setSyncStatus(`⚡ Đã click vào (${clickX}, ${clickY})`);
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -91,7 +88,32 @@ export default function SessionManagerPage() {
     }
   };
 
-  // Xử lý gõ văn bản Zero-Delay qua WebSocket
+  // Xử lý Cuộn Chuột (Mouse Wheel) trực tiếp vào Zalo Web
+  const handleCanvasWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = 1440 / rect.width;
+    const scaleY = 900 / rect.height;
+
+    const wheelX = Math.round((e.clientX - rect.left) * scaleX);
+    const wheelY = Math.round((e.clientY - rect.top) * scaleY);
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "WHEEL",
+          x: wheelX,
+          y: wheelY,
+          deltaX: e.deltaX,
+          deltaY: e.deltaY,
+        })
+      );
+    }
+  };
+
+  // Xử lý gõ văn bản Zero-Delay
   const handleTypeText = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim()) return;
@@ -109,7 +131,7 @@ export default function SessionManagerPage() {
   };
 
   const handleTriggerSync = async () => {
-    setSyncStatus("Đang gửi lệnh kích hoạt đồng bộ...");
+    setSyncStatus("Đang gửi lệnh kích hoạt đồng bộ tới Zalo Web...");
     try {
       const res = await fetch("/api/sync", { method: "POST" });
       const data = await res.json();
@@ -120,12 +142,12 @@ export default function SessionManagerPage() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0f172a", padding: "16px 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#f8fafc" }}>
-      <div style={{ maxWidth: 1440, margin: "0 auto" }}>
+    <div style={{ minHeight: "100vh", background: "#0f172a", padding: "16px 24px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#f8fafc", overflowY: "auto" }}>
+      <div style={{ maxWidth: 1440, margin: "0 auto", paddingBottom: 40 }}>
         {/* Header Bar */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#fff" }}>🖥️ Live Master Stream (1440x900 Zero-Delay)</h1>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#fff" }}>🖥️ Live Master Stream (1440x900 Cuộn & Click Mượt)</h1>
             <span style={{ fontSize: 12, padding: "3px 10px", borderRadius: 12, background: streamConnected ? "rgba(16, 185, 129, 0.2)" : "rgba(239, 68, 68, 0.2)", color: streamConnected ? "#34d399" : "#f87171", border: `1px solid ${streamConnected ? "#059669" : "#dc2626"}` }}>
               {streamConnected ? `🟢 LIVE STREAM (${fps} FPS)` : "🔴 DISCONNECTED"}
             </span>
@@ -145,6 +167,11 @@ export default function SessionManagerPage() {
               💬 Quay lại Chat App
             </Link>
           </div>
+        </div>
+
+        {/* Sync Instruction Guide */}
+        <div style={{ background: "rgba(30, 41, 59, 0.8)", border: "1px solid #334155", padding: "12px 18px", borderRadius: 10, marginBottom: 12, fontSize: 13, color: "#cbd5e1" }}>
+          📱 <b>Mẹo Đồng bộ Tin nhắn:</b> Khi bấm <i>"Đồng bộ ngay"</i>, hãy <b>mở ứng dụng Zalo trên điện thoại của bạn</b> (mở khóa màn hình) và giữ ứng dụng chạy để điện thoại chấp nhận đẩy dữ liệu lịch sử tin nhắn sang máy tính.
         </div>
 
         {/* Input Bar */}
@@ -170,11 +197,11 @@ export default function SessionManagerPage() {
           </div>
         )}
 
-        {/* Real-time Canvas Display (Desktop Standard 1440x900) */}
+        {/* Real-time Canvas Display (Desktop Standard 1440x900 với Cuộn Chuột Wheel) */}
         <div style={{ background: "#000000", borderRadius: 12, overflow: "hidden", border: "1px solid #334155", boxShadow: "0 8px 32px rgba(0,0,0,0.5)", position: "relative" }}>
           <div style={{ padding: "8px 14px", background: "#1e293b", fontSize: 12, color: "#94a3b8", display: "flex", justifyContent: "space-between" }}>
-            <span>🖱️ <b>Tương tác Trực tiếp:</b> Click trực tiếp vào các nút hoặc cuộc trò chuyện trên màn hình.</span>
-            <span>Độ phân giải chuẩn: 1440 x 900</span>
+            <span>🖱️ <b>Tương tác Đầy đủ:</b> Click chuột và lăn con cuộn chuột (Scroll Wheel) trực tiếp trên màn hình Zalo.</span>
+            <span>Tỉ lệ chuẩn 1440 x 900</span>
           </div>
 
           <div style={{ position: "relative", width: "100%", height: "auto", display: "flex", justifyContent: "center", alignItems: "center", background: "#000" }}>
@@ -183,6 +210,7 @@ export default function SessionManagerPage() {
               width={1440}
               height={900}
               onClick={handleCanvasClick}
+              onWheel={handleCanvasWheel}
               style={{
                 width: "100%",
                 height: "auto",

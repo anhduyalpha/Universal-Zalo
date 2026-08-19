@@ -79,7 +79,6 @@ export default function ZaloMultiDeviceApp() {
               type: "TEXT",
             });
 
-            // Cập nhật last message trong danh sách hội thoại
             await db.conversations.update(convId, {
               lastMessage: data.textContent,
               lastTimestamp: Date.now(),
@@ -90,8 +89,7 @@ export default function ZaloMultiDeviceApp() {
         }
       };
 
-      // Tự động kiểm tra và cập nhật danh sách hội thoại định kỳ
-      const timer = setInterval(fetchLiveConversations, 10000);
+      const timer = setInterval(fetchLiveConversations, 8000);
 
       return () => {
         clearInterval(timer);
@@ -109,7 +107,6 @@ export default function ZaloMultiDeviceApp() {
     const now = Date.now();
     const targetConvId = activeConvId || "conv_1";
 
-    // 1. Lưu ngay vào IndexedDB nội bộ với trạng thái SENDING (Optimistic UI)
     await db.messages.add({
       msgId: tempMsgId,
       conversationId: targetConvId,
@@ -120,13 +117,11 @@ export default function ZaloMultiDeviceApp() {
       type: "TEXT",
     });
 
-    // 2. Cập nhật last message của conversation
     await db.conversations.update(targetConvId, {
       lastMessage: `Bạn: ${inputText}`,
       lastTimestamp: now,
     });
 
-    // 3. Gửi qua WebSocket tới Gateway Hub
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
@@ -150,16 +145,15 @@ export default function ZaloMultiDeviceApp() {
       const data = await res.json();
       setSyncFeedback(data.message || "Đã gửi lệnh đồng bộ.");
       await fetchLiveConversations();
-      setTimeout(() => setSyncFeedback(null), 4000);
+      setTimeout(() => setSyncFeedback(null), 5000);
     } catch (e: any) {
       setSyncFeedback(`Lỗi: ${e.message}`);
-      setTimeout(() => setSyncFeedback(null), 4000);
+      setTimeout(() => setSyncFeedback(null), 5000);
     } finally {
       setIsSyncing(false);
     }
   };
 
-  // Danh sách hội thoại lọc theo từ khóa tìm kiếm
   const filteredConversations = localConversations.filter((c) =>
     c.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -168,15 +162,13 @@ export default function ZaloMultiDeviceApp() {
 
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden", background: "#f0f2f5", fontFamily: "system-ui, -apple-system, sans-serif" }}>
-      {/* 1. Thanh Menu Điều Hướng Cột Trái Cùng (Far-left Icon Nav) */}
+      {/* 1. Thanh Menu Điều Hướng Cột Trái Cùng */}
       <div style={{ width: 64, background: "#0068ff", display: "flex", flexDirection: "column", alignItems: "center", padding: "16px 0", justifyContent: "space-between", flexShrink: 0 }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 20, width: "100%" }}>
-          {/* Logo / Avatar */}
           <div style={{ width: 44, height: 44, borderRadius: "50%", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold", color: "#0068ff", fontSize: 18, boxShadow: "0 2px 6px rgba(0,0,0,0.15)" }}>
             Z
           </div>
 
-          {/* Nav Icons */}
           <button
             onClick={() => setNavTab("MESSAGES")}
             title="Tin nhắn"
@@ -193,7 +185,6 @@ export default function ZaloMultiDeviceApp() {
           </button>
         </div>
 
-        {/* Bottom Actions */}
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
           <Link
             href="/session"
@@ -209,10 +200,9 @@ export default function ZaloMultiDeviceApp() {
         </div>
       </div>
 
-      {/* 2. Cột Danh Sách Hội Thoại (Conversations Sidebar) */}
-      <div style={{ width: 340, background: "#ffffff", borderRight: "1px solid #e5e7eb", display: "flex", flexDirection: "column", flexShrink: 0 }}>
-        {/* Header tìm kiếm */}
-        <div style={{ padding: "14px 16px", borderBottom: "1px solid #f1f5f9" }}>
+      {/* 2. Cột Danh Sách Hội Thoại với Cuộn Mượt (Scrollable Sidebar) */}
+      <div style={{ width: 340, background: "#ffffff", borderRight: "1px solid #e5e7eb", display: "flex", flexDirection: "column", flexShrink: 0, height: "100%" }}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #f1f5f9", flexShrink: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1e293b" }}>Hội thoại</h2>
             <button
@@ -233,15 +223,14 @@ export default function ZaloMultiDeviceApp() {
           />
         </div>
 
-        {/* Thông báo Feedback nếu có */}
         {syncFeedback && (
-          <div style={{ padding: "8px 14px", background: "#e0f2fe", fontSize: 12, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>
+          <div style={{ padding: "8px 14px", background: "#e0f2fe", fontSize: 12, color: "#0369a1", borderBottom: "1px solid #bae6fd", flexShrink: 0 }}>
             💡 {syncFeedback}
           </div>
         )}
 
-        {/* Danh sách các cuộc trò chuyện */}
-        <div style={{ flex: 1, overflowY: "auto" }}>
+        {/* Danh sách các cuộc trò chuyện có thanh cuộn mượt */}
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           {filteredConversations.length === 0 ? (
             <div style={{ textAlign: "center", padding: "40px 20px", color: "#94a3b8", fontSize: 14 }}>
               Đang tải danh sách hội thoại từ Zalo...
@@ -292,10 +281,10 @@ export default function ZaloMultiDeviceApp() {
         </div>
       </div>
 
-      {/* 3. Khung Chat Chính (Main Chat Area) */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#ffffff" }}>
+      {/* 3. Khung Chat Chính (Main Chat Area với Cuộn Tin Nhắn) */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#ffffff", height: "100%", minWidth: 0 }}>
         {/* Chat Header */}
-        <div style={{ height: 64, padding: "0 24px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff" }}>
+        <div style={{ height: 64, padding: "0 24px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff", flexShrink: 0 }}>
           {currentActiveConv ? (
             <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
               <img
@@ -331,8 +320,8 @@ export default function ZaloMultiDeviceApp() {
           </div>
         </div>
 
-        {/* Messages Stream View */}
-        <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc" }}>
+        {/* Messages Stream View có thanh cuộn mượt (Scrollable Messages Area) */}
+        <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc", minHeight: 0 }}>
           {activeMessages.length === 0 ? (
             <div style={{ margin: "auto", textAlign: "center", color: "#94a3b8" }}>
               <div style={{ fontSize: 40, marginBottom: 10 }}>💬</div>
@@ -366,7 +355,7 @@ export default function ZaloMultiDeviceApp() {
         </div>
 
         {/* Input Composer */}
-        <form onSubmit={handleSendMessage} style={{ padding: "14px 20px", borderTop: "1px solid #e5e7eb", background: "#ffffff", display: "flex", alignItems: "center", gap: 12 }}>
+        <form onSubmit={handleSendMessage} style={{ padding: "14px 20px", borderTop: "1px solid #e5e7eb", background: "#ffffff", display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
           <button type="button" title="Gửi ảnh / Tệp" style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}>
             📎
           </button>
