@@ -13,7 +13,10 @@ export default function ChatDashboard() {
   const messages = useLiveQuery(() => db.messages.orderBy("timestamp").toArray(), []) || [];
 
   useEffect(() => {
-    const ws = new WebSocket("ws://127.0.0.1:8080");
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.hostname || "127.0.0.1";
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `${protocol}//${host}:8080`;
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => setWsStatus("CONNECTED");
