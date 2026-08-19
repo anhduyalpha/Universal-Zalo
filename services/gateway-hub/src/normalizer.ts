@@ -19,7 +19,7 @@ export interface SanitizedMessageResult {
   mentions: MentionToken[];
 }
 
-// Bảng ánh xạ mã reaction/emoticon di sản của Zalo sang emoji & kiểu chuẩn
+// Bảng ánh xạ mã reaction/emoticon di sản của Zalo sang emoji & kiểu chuẩn (Không trùng lặp key)
 export const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: string }> = {
   "/-strong": { type: "like", emoji: "👍" },
   "(y)": { type: "like", emoji: "👍" },
@@ -32,9 +32,8 @@ export const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: 
   ":-bd": { type: "haha", emoji: "😆" },
   ":-D": { type: "haha", emoji: "😄" },
   ":D": { type: "haha", emoji: "😄" },
-  ":>:o:-(( ": { type: "cry", emoji: "😭" },
-  ":>:o:-(( ": { type: "cry", emoji: "😭" },
   ":>:o:-(": { type: "cry", emoji: "😭" },
+  ":>:o:-(( ": { type: "cry", emoji: "😭" },
   ":-(( ": { type: "cry", emoji: "😭" },
   ":-(": { type: "cry", emoji: "😢" },
   ":(": { type: "cry", emoji: "😢" },
