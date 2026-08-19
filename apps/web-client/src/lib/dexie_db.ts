@@ -4,6 +4,13 @@ export type MessageType = "TEXT" | "IMAGE" | "VIDEO" | "FILE" | "VOICE" | "STICK
 export type MessageStatus = "SENDING" | "DELIVERED" | "FAILED";
 export type SenderType = "ME" | "OTHER";
 
+export interface MessageReaction {
+  code: string;
+  type: string;
+  emoji: string;
+  count: number;
+}
+
 export interface LocalMessage {
   id?: number;
   msgId: string;
@@ -24,6 +31,7 @@ export interface LocalMessage {
   stickerUrl?: string;
   replyToMsgId?: string;
   replyToText?: string;
+  reactions?: MessageReaction[];
 }
 
 export interface Conversation {
@@ -44,9 +52,42 @@ export class ZaloLocalDatabase extends Dexie {
 
   constructor() {
     super("UniversalZaloDB");
-    this.version(2).stores({
+    this.version(3).stores({
       messages: "++id, msgId, conversationId, sender, status, timestamp, type",
       conversations: "id, name, type, lastTimestamp, unreadCount, isPinned",
+    });
+  }
+
+  /**
+   * Transactional Atomic State Reconcile: Đối soát và làm sạch toàn bộ cơ sở dữ liệu cục bộ
+   */
+  async reconcileFullState(
+    newConversations: Conversation[],
+    newMessagesMap: Record<string, LocalMessage[]>
+  ) {
+    return this.transaction("rw", [this.conversations, this.messages], async () => {
+      // 1. Cập nhật hoặc thêm mới các cuộc hội thoại
+      for (const conv of newConversations) {
+        await this.conversations.put(conv);
+      }
+
+      // 2. Cập nhật các tin nhắn với ID chuẩn, loại bỏ các tin nhắn rác trùng lặp
+      for (const [convId, msgs] of Object.entries(newMessagesMap)) {
+        for (const msg of msgs) {
+          const existing = await this.messages.where("msgId").equals(msg.msgId).first();
+          if (existing && existing.id) {
+            await this.messages.update(existing.id, {
+              ...msg,
+              conversationId: convId,
+            });
+          } else {
+            await this.messages.add({
+              ...msg,
+              conversationId: convId,
+            });
+          }
+        }
+      }
     });
   }
 }
@@ -77,17 +118,6 @@ export async function seedInitialConversations() {
         lastMessage: "Session synchronized with Linux server.",
         lastTimestamp: Date.now() - 60000,
         unreadCount: 0,
-        isPinned: false,
-        isOnline: true,
-      },
-      {
-        id: "zalo_bot",
-        name: "Zalo AI Assistant",
-        avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=ZaloBot",
-        type: "DIRECT",
-        lastMessage: "Sẵn sàng hỗ trợ bạn gửi tin nhắn, ảnh và sticker.",
-        lastTimestamp: Date.now() - 3600000,
-        unreadCount: 1,
         isPinned: false,
         isOnline: true,
       },

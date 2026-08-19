@@ -4,6 +4,8 @@ import { TokenBucketLimiter } from "./token_bucket.js";
 import { HybridLogicalClock } from "./hlc.js";
 import { nanoid } from "nanoid";
 import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
+import { cleanMessageContent, ParsedReaction } from "./normalizer.js";
+import { executeFullMasterResync, scrapeConversationWithHistory, extractSidebarConversations } from "./crawler.js";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -65,7 +67,7 @@ function getCdpJson(host: string, port: number, path: string): Promise<any> {
   });
 }
 
-async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
+export async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
   const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
   const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
   const cdpPort = parseInt(cdpPortStr || "9222", 10);
@@ -88,7 +90,7 @@ async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
     const timeout = setTimeout(() => {
       try { ws.close(); } catch {}
       reject(new Error(`CDP ${method} timed out`));
-    }, 8000);
+    }, 10000);
 
     const cmdId = Math.floor(Math.random() * 100000);
 
@@ -227,101 +229,18 @@ async function ensureScreencastStream() {
   }
 }
 
-// Hàm mở cuộc hội thoại trong Chromium và cào toàn bộ lịch sử tin nhắn vào Server Volume
-async function openAndScrapeConversation(convId: string, convName?: string): Promise<StoredMessage[]> {
-  try {
-    const escapedName = JSON.stringify(convName || "");
-    const script = `
-      (async () => {
-        const targetName = ${escapedName};
-        // 1. Tìm và click vào cuộc hội thoại nếu có targetName
-        if (targetName) {
-          const convElements = Array.from(document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item'));
-          const targetEl = convElements.find(el => {
-            const nameEl = el.querySelector('.conv-item-title__name, .name, [class*="name"], [class*="title"], span[title]');
-            const name = nameEl ? nameEl.textContent.trim() : (el.getAttribute('title') || "");
-            return name && name.toLowerCase().includes(targetName.toLowerCase());
-          });
-          if (targetEl) {
-            targetEl.click();
-            await new Promise(r => setTimeout(r, 400));
-          }
-        }
-
-        // 2. Cào toàn bộ tin nhắn trong khung chat
-        const messages = [];
-        const msgNodes = document.querySelectorAll('.chat-message, [class*="chat-message"], .msg-item, [id^="msg-"], .message-view');
-        
-        msgNodes.forEach((el, idx) => {
-          const textEl = el.querySelector('.content, .text, [class*="text"], [class*="content"], .bubble-content');
-          const imgEl = el.querySelector('img[class*="image"], img[src*="zdn.vn"], img[src*="zalo"], .img-msg img');
-          const isMe = el.classList.contains('me') || el.classList.contains('from-me') || el.getAttribute('data-is-me') === 'true' || el.querySelector('.me, .from-me') !== null;
-          const timeEl = el.querySelector('.time, [class*="time"], .card-time');
-          
-          const text = textEl ? textEl.textContent.trim() : "";
-          const imgSrc = imgEl ? imgEl.src : null;
-
-          if (text || imgSrc) {
-            messages.push({
-              msgId: el.getAttribute('id') || ('msg_' + Date.now() + '_' + idx),
-              textContent: text,
-              sender: isMe ? "ME" : "OTHER",
-              mediaUrl: imgSrc,
-              type: imgSrc ? "IMAGE" : "TEXT",
-              timeStr: timeEl ? timeEl.textContent.trim() : ""
-            });
-          }
-        });
-
-        return messages;
-      })()
-    `;
-
-    const result = await sendCdpCommand("Runtime.evaluate", {
-      expression: script,
-      returnByValue: true,
-      awaitPromise: true,
-    });
-
-    const scrapedList = result?.result?.value;
-    const persistedList: StoredMessage[] = [];
-
-    if (Array.isArray(scrapedList) && scrapedList.length > 0) {
-      for (const item of scrapedList) {
-        const saved = await serverStorage.addMessage({
-          msgId: item.msgId,
-          conversationId: convId,
-          textContent: item.textContent,
-          sender: item.sender,
-          status: "DELIVERED",
-          timestamp: Date.now(),
-          type: item.type,
-          mediaUrl: item.mediaUrl,
-        });
-        persistedList.push(saved);
-      }
-      console.log(`[Ingestion] Ingested ${persistedList.length} messages for conversation ${convId} (${convName || ""})`);
-    }
-
-    return serverStorage.getMessages(convId, 200);
-  } catch (e) {
-    console.warn(`[Ingestion Warning] Could not scrape conversation ${convId}:`, e);
-    return serverStorage.getMessages(convId, 200);
-  }
-}
-
 // Background Ingestion Loop tự động cập nhật tin nhắn định kỳ
 async function runBackgroundMessageIngestion() {
   try {
     const convs = serverStorage.getConversations();
     if (convs.length > 0) {
       const activeConv = convs[0];
-      await openAndScrapeConversation(activeConv.id, activeConv.name);
+      await scrapeConversationWithHistory(sendCdpCommand, activeConv.id, activeConv.name, 1);
     }
   } catch (e) {}
 }
 
-setInterval(runBackgroundMessageIngestion, 6000);
+setInterval(runBackgroundMessageIngestion, 8000);
 
 function parseBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -396,7 +315,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. Upload File / Media từ PWA lên Server Volume (`/api/upload`)
+  // 3. TOÀN DIỆN: FULL MASTER SESSION DATA DUMP & RESYNC (`/api/sync/full-resync` hoặc `/api/sync/full`)
+  if ((req.url === "/api/sync/full-resync" || req.url === "/api/sync/full") && req.method === "POST") {
+    try {
+      console.log("⚡ Triggering Full Master Data Resync via API...");
+      const dumpResult = await executeFullMasterResync(sendCdpCommand);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(dumpResult));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: e.message }));
+    }
+    return;
+  }
+
+  // 4. Upload File / Media từ PWA lên Server Volume (`/api/upload`)
   if (req.url === "/api/upload" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -445,6 +378,7 @@ const server = http.createServer(async (req, res) => {
         mediaUrl: savedMsg.mediaUrl,
         type: "IMAGE",
         status: "DELIVERED",
+        reactions: savedMsg.reactions,
         hlc: hlc.now(),
       });
 
@@ -463,18 +397,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 4. Lấy danh sách tin nhắn từ Server Volume & Tự động cào từ Zalo Web (`/api/messages`)
+  // 5. Lấy danh sách tin nhắn từ Server Volume & Tự động cào từ Zalo Web (`/api/messages`)
   if (req.url?.startsWith("/api/messages") && req.method === "GET") {
     const urlObj = new URL(req.url, `http://localhost:${PORT}`);
     const convId = urlObj.searchParams.get("conversationId") || undefined;
     const convName = urlObj.searchParams.get("convName") || undefined;
-    const limit = parseInt(urlObj.searchParams.get("limit") || "200", 10);
+    const limit = parseInt(urlObj.searchParams.get("limit") || "500", 10);
 
     let msgs = serverStorage.getMessages(convId, limit);
 
-    // Nếu chưa có tin nhắn hoặc số lượng ít, tự động mở và cào trực tiếp từ Zalo Web
     if (convId && (msgs.length === 0 || urlObj.searchParams.get("refresh") === "true")) {
-      msgs = await openAndScrapeConversation(convId, convName);
+      if (convName) {
+        msgs = await scrapeConversationWithHistory(sendCdpCommand, convId, convName, 2);
+      }
     }
 
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -482,45 +417,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 5. Trích xuất danh sách hội thoại từ Zalo Web (`/api/conversations`)
+  // 6. Trích xuất danh sách hội thoại từ Zalo Web (`/api/conversations`)
   if (req.url === "/api/conversations" || req.url === "/conversations") {
     try {
-      const script = `
-        (() => {
-          const items = [];
-          const convElements = document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item, div[id^="conv-item-"]');
-          convElements.forEach((el, idx) => {
-            const nameEl = el.querySelector('.conv-item-title__name, .name, [class*="name"], [class*="title"], span[title]');
-            const msgEl = el.querySelector('.conv-message, .msg, [class*="message"], [class*="last-msg"], [class*="truncate"]');
-            const timeEl = el.querySelector('.time, [class*="time"]');
-            const imgEl = el.querySelector('img');
-            
-            const name = nameEl ? nameEl.textContent.trim() : (el.getAttribute('title') || "");
-            if (name && name !== "Tìm kiếm" && !items.some(i => i.name === name)) {
-              items.push({
-                id: 'conv_' + (idx + 1),
-                name: name,
-                avatar: imgEl ? imgEl.src : ('https://api.dicebear.com/7.x/bottts/svg?seed=' + encodeURIComponent(name)),
-                type: (name.includes("Nhóm") || name.includes("CNTT") || name.includes("Thủ Thuật") || name.includes("GAME")) ? "GROUP" : "DIRECT",
-                lastMessage: msgEl ? msgEl.textContent.trim() : "Chưa có tin nhắn mới",
-                lastTimestamp: Date.now() - (idx * 120000),
-                unreadCount: 0,
-                isPinned: idx < 2
-              });
-            }
-          });
-          return items;
-        })()
-      `;
-
-      const result = await sendCdpCommand("Runtime.evaluate", {
-        expression: script,
-        returnByValue: true,
-        awaitPromise: true,
-      });
-
-      const convs = result?.result?.value || [];
-      if (Array.isArray(convs) && convs.length > 0) {
+      const convs = await extractSidebarConversations(sendCdpCommand);
+      if (convs.length > 0) {
         serverStorage.saveConversations(convs);
       }
 
@@ -535,7 +436,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 6. Endpoint Click Chuột (`/api/action/click`)
+  // 7. Endpoint Click Chuột (`/api/action/click`)
   if (req.url === "/api/action/click" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -567,7 +468,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 7. Endpoint Cuộn Chuột (`/api/action/wheel`)
+  // 8. Endpoint Cuộn Chuột (`/api/action/wheel`)
   if (req.url === "/api/action/wheel" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -593,7 +494,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 8. Endpoint Gõ văn bản (`/api/action/type`)
+  // 9. Endpoint Gõ văn bản (`/api/action/type`)
   if (req.url === "/api/action/type" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -632,7 +533,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 9. Endpoint kích hoạt Đồng bộ tin nhắn (`/api/sync`)
+  // 10. Endpoint kích hoạt Đồng bộ tin nhắn (`/api/sync`)
   if (req.url === "/api/sync" || req.url === "/sync") {
     try {
       const script = `
@@ -662,7 +563,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 10. Endpoint Bấm Hủy / Đóng Modal lỗi đồng bộ (`/api/dismiss-modal`)
+  // 11. Endpoint Bấm Hủy / Đóng Modal lỗi đồng bộ (`/api/dismiss-modal`)
   if (req.url === "/api/dismiss-modal" || req.url === "/dismiss-modal") {
     try {
       const script = `
@@ -692,7 +593,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 11. Health check
+  // 12. Health check
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "OK", activeClients: connectedClients.size, totalSavedMessages: serverStorage.getMessages().length }));
@@ -718,9 +619,9 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      // Xử lý chuyển đổi cuộc hội thoại từ PWA -> Chromium
+      // Chuyển đổi cuộc hội thoại từ PWA -> Chromium
       if (msg.type === "SELECT_CONVERSATION" && msg.conversationName) {
-        await openAndScrapeConversation(msg.conversationId || "general", msg.conversationName);
+        await scrapeConversationWithHistory(sendCdpCommand, msg.conversationId || "general", msg.conversationName, 1);
         return;
       }
 
@@ -743,6 +644,21 @@ wss.on("connection", (ws: WebSocket) => {
                 params: { type: "mouseReleased", button: "left", clickCount: 1, x: clickX, y: clickY },
               })
             );
+          } else {
+            await sendCdpCommand("Input.dispatchMouseEvent", {
+              type: "mousePressed",
+              button: "left",
+              clickCount: 1,
+              x: clickX,
+              y: clickY,
+            });
+            await sendCdpCommand("Input.dispatchMouseEvent", {
+              type: "mouseReleased",
+              button: "left",
+              clickCount: 1,
+              x: clickX,
+              y: clickY,
+            });
           }
         } catch (err) {}
         return;
@@ -797,7 +713,7 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      // XỬ LÝ GỬI TIN NHẮN & LƯU VĨNH VIỄN VÀO SERVER VOLUME
+      // XỬ LÝ GỬI TIN NHẮN VỚI LÀM SẠCH VÀ LƯU THẲNG SERVER VOLUME
       if (msg.type === "SEND_MESSAGE") {
         if (!limiter.tryConsume(1)) {
           ws.send(
@@ -814,16 +730,20 @@ wss.on("connection", (ws: WebSocket) => {
         const ts = hlc.now();
         const convId = msg.conversationId || "general";
 
+        // Làm sạch nội dung tin nhắn trước khi lưu
+        const cleaned = cleanMessageContent(msg.textContent || "");
+
         // 1. Lưu vĩnh viễn vào Server Volume
         const savedMsg = await serverStorage.addMessage({
           msgId,
           conversationId: convId,
-          textContent: msg.textContent || "",
+          textContent: cleaned.cleanText,
           sender: "ME",
           status: "DELIVERED",
           timestamp: ts.physicalTime || Date.now(),
           type: msg.mediaType || (msg.mediaUrl ? "IMAGE" : "TEXT"),
           mediaUrl: msg.mediaUrl,
+          reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
         });
 
         // 2. Optimistic ACK
@@ -846,6 +766,7 @@ wss.on("connection", (ws: WebSocket) => {
           mediaUrl: savedMsg.mediaUrl,
           type: savedMsg.type,
           status: "DELIVERED",
+          reactions: savedMsg.reactions,
           hlc: ts,
         });
 
@@ -856,9 +777,9 @@ wss.on("connection", (ws: WebSocket) => {
         }
 
         // 4. Inject tin nhắn vào Zalo Web qua CDP để gửi thật
-        if (msg.textContent) {
+        if (cleaned.cleanText) {
           try {
-            await sendCdpCommand("Input.insertText", { text: msg.textContent });
+            await sendCdpCommand("Input.insertText", { text: cleaned.cleanText });
             await sendCdpCommand("Input.dispatchKeyEvent", {
               type: "rawKeyDown",
               key: "Enter",
@@ -891,6 +812,6 @@ wss.on("connection", (ws: WebSocket) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
-  console.log(`💾 Server Volume Storage active at /app/data`);
-  console.log(`🖼️ Media Storage active at /app/data/media`);
+  console.log(`🧹 Zalo Legacy Code Stripper & Reaction AST Sanitizer active`);
+  console.log(`⚡ Full Master Data Resync Pipeline active`);
 });

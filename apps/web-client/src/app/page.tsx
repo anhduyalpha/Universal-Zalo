@@ -11,8 +11,8 @@ export default function ZaloMultiDeviceApp() {
   const [inputText, setInputText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [wsStatus, setWsStatus] = useState<"CONNECTED" | "DISCONNECTED" | "CONNECTING">("CONNECTING");
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [isFullSyncing, setIsFullSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<{ stage: string; percent: number } | null>(null);
   const [navTab, setNavTab] = useState<"MESSAGES" | "CONTACTS" | "SETTINGS">("MESSAGES");
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -72,6 +72,7 @@ export default function ZaloMultiDeviceApp() {
               timestamp: msg.timestamp,
               type: msg.type || "TEXT",
               mediaUrl: msg.mediaUrl,
+              reactions: msg.reactions,
             });
           }
         }
@@ -129,6 +130,7 @@ export default function ZaloMultiDeviceApp() {
               timestamp: data.hlc?.physicalTime || Date.now(),
               type: data.type || "TEXT",
               mediaUrl: data.mediaUrl,
+              reactions: data.reactions,
             });
 
             await db.conversations.update(convId, {
@@ -141,7 +143,7 @@ export default function ZaloMultiDeviceApp() {
         }
       };
 
-      const timer = setInterval(fetchLiveConversations, 8000);
+      const timer = setInterval(fetchLiveConversations, 10000);
 
       return () => {
         clearInterval(timer);
@@ -236,24 +238,45 @@ export default function ZaloMultiDeviceApp() {
     }
   };
 
-  // Kích hoạt đồng bộ tin nhắn từ Zalo Cloud
-  const handleTriggerSync = async () => {
-    setIsSyncing(true);
-    setSyncFeedback("Đang tải toàn bộ lịch sử tin nhắn từ Zalo Cloud...");
+  // THỰC THI FULL MASTER RESYNC TOÀN DIỆN
+  const handleTriggerFullResync = async () => {
+    setIsFullSyncing(true);
+    setSyncProgress({ stage: "1/4: Đang kết nối tới Headless Master Session...", percent: 20 });
+
     try {
-      const res = await fetch("/api/sync", { method: "POST" });
-      const data = await res.json();
-      setSyncFeedback(data.message || "Đã kích hoạt đồng bộ.");
-      await fetchLiveConversations();
-      if (activeConvId && currentActiveConv) {
-        await fetchServerMessages(activeConvId, currentActiveConv.name, true);
+      setTimeout(() => {
+        setSyncProgress({ stage: "2/4: Đang cào cây hội thoại & tải bộ đệm tin nhắn lịch sử...", percent: 50 });
+      }, 1500);
+
+      setTimeout(() => {
+        setSyncProgress({ stage: "3/4: Đang làm sạch biểu tượng rác & trích xuất Reaction AST...", percent: 75 });
+      }, 3500);
+
+      const res = await fetch("/api/sync/full-resync", { method: "POST" });
+      const dumpResult = await res.json();
+
+      if (dumpResult && dumpResult.success) {
+        setSyncProgress({ stage: "4/4: Đang đối soát và lập chỉ mục cơ sở dữ liệu IndexedDB...", percent: 95 });
+
+        // Đối soát và cập nhật cơ sở dữ liệu Dexie cục bộ
+        if (dumpResult.conversations && dumpResult.messagesByConversation) {
+          await db.reconcileFullState(dumpResult.conversations, dumpResult.messagesByConversation);
+        }
+
+        setSyncProgress({ stage: `✅ Hoàn tất đồng bộ ${dumpResult.totalConversations} hội thoại & ${dumpResult.totalMessages} tin nhắn!`, percent: 100 });
+        setTimeout(() => {
+          setIsFullSyncing(false);
+          setSyncProgress(null);
+        }, 2000);
+      } else {
+        throw new Error(dumpResult?.error || "Lỗi đồng bộ dữ liệu từ server.");
       }
-      setTimeout(() => setSyncFeedback(null), 5000);
     } catch (e: any) {
-      setSyncFeedback(`Lỗi: ${e.message}`);
-      setTimeout(() => setSyncFeedback(null), 5000);
-    } finally {
-      setIsSyncing(false);
+      setSyncProgress({ stage: `❌ Lỗi: ${e.message}`, percent: 100 });
+      setTimeout(() => {
+        setIsFullSyncing(false);
+        setSyncProgress(null);
+      }, 4000);
     }
   };
 
@@ -307,12 +330,12 @@ export default function ZaloMultiDeviceApp() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1e293b" }}>Hội thoại</h2>
             <button
-              onClick={handleTriggerSync}
-              disabled={isSyncing}
-              title="Đồng bộ danh sách từ Zalo Web"
-              style={{ padding: "4px 10px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 14, fontSize: 12, fontWeight: 600, color: "#0068ff", cursor: "pointer" }}
+              onClick={handleTriggerFullResync}
+              disabled={isFullSyncing}
+              title="Đồng bộ sâu toàn bộ lịch sử tin nhắn và làm sạch reaction"
+              style={{ padding: "5px 12px", background: isFullSyncing ? "#e2e8f0" : "#0068ff", border: "none", borderRadius: 14, fontSize: 12, fontWeight: 600, color: isFullSyncing ? "#64748b" : "#fff", cursor: isFullSyncing ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 6, boxShadow: "0 2px 6px rgba(0,104,255,0.2)" }}
             >
-              {isSyncing ? "⏳ Đang sync..." : "🔄 Đồng bộ"}
+              {isFullSyncing ? "⏳ Đang đồng bộ..." : "⚡ Đồng bộ toàn bộ"}
             </button>
           </div>
           <input
@@ -324,9 +347,22 @@ export default function ZaloMultiDeviceApp() {
           />
         </div>
 
-        {syncFeedback && (
-          <div style={{ padding: "8px 14px", background: "#e0f2fe", fontSize: 12, color: "#0369a1", borderBottom: "1px solid #bae6fd", flexShrink: 0 }}>
-            💡 {syncFeedback}
+        {/* Progress Bar khi đang Full Sync */}
+        {syncProgress && (
+          <div style={{ padding: "10px 14px", background: "#e0f2fe", borderBottom: "1px solid #bae6fd", flexShrink: 0 }}>
+            <div style={{ fontSize: 12, color: "#0369a1", fontWeight: 600, marginBottom: 6 }}>
+              {syncProgress.stage}
+            </div>
+            <div style={{ width: "100%", height: 6, background: "#bae6fd", borderRadius: 3, overflow: "hidden" }}>
+              <div
+                style={{
+                  width: `${syncProgress.percent}%`,
+                  height: "100%",
+                  background: "#0284c7",
+                  transition: "width 0.3s ease",
+                }}
+              />
+            </div>
           </div>
         )}
 
@@ -396,7 +432,7 @@ export default function ZaloMultiDeviceApp() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b" }}>{currentActiveConv.name}</div>
                 <div style={{ fontSize: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}>
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981" }}></span>
-                  Đang hoạt động (Lưu vĩnh viễn trên Server Volume)
+                  Đang hoạt động (Đồng bộ sạch & Lưu vĩnh viễn)
                 </div>
               </div>
             </div>
@@ -420,13 +456,13 @@ export default function ZaloMultiDeviceApp() {
           </div>
         </div>
 
-        {/* Messages Stream View hỗ trợ hiển thị Media (Ảnh, Video, Audio) */}
-        <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc", minHeight: 0 }}>
+        {/* Messages Stream View hỗ trợ hiển thị Media & Huy hiệu Reaction */}
+        <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14, background: "#f8fafc", minHeight: 0 }}>
           {activeMessages.length === 0 ? (
             <div style={{ margin: "auto", textAlign: "center", color: "#94a3b8" }}>
               <div style={{ fontSize: 40, marginBottom: 10 }}>💬</div>
               <div style={{ fontSize: 15, fontWeight: 600, color: "#475569" }}>Lịch sử tin nhắn của {currentActiveConv?.name || "cuộc hội thoại"}</div>
-              <div style={{ fontSize: 13, marginTop: 4 }}>Bấm <b>"🔄 Tải lại tin nhắn"</b> ở trên để cào thêm tin nhắn từ Zalo!</div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>Bấm <b>"⚡ Đồng bộ toàn bộ"</b> để tải và làm sạch toàn bộ tin nhắn!</div>
             </div>
           ) : (
             activeMessages.map((m) => (
@@ -435,43 +471,77 @@ export default function ZaloMultiDeviceApp() {
                 style={{
                   alignSelf: m.sender === "ME" ? "flex-end" : "flex-start",
                   maxWidth: "65%",
-                  background: m.sender === "ME" ? "#0068ff" : "#ffffff",
-                  color: m.sender === "ME" ? "#ffffff" : "#1e293b",
-                  padding: "10px 16px",
-                  borderRadius: 16,
-                  borderBottomRightRadius: m.sender === "ME" ? 2 : 16,
-                  borderBottomLeftRadius: m.sender === "OTHER" ? 2 : 16,
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: m.sender === "ME" ? "flex-end" : "flex-start",
                 }}
               >
-                {/* Media Content (Ảnh / Video / Audio) */}
-                {m.mediaUrl && m.type === "IMAGE" && (
-                  <img
-                    src={m.mediaUrl}
-                    alt="Media Attachment"
-                    onClick={() => setPreviewImage(m.mediaUrl || null)}
-                    style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
-                  />
-                )}
-                {m.mediaUrl && m.type === "VIDEO" && (
-                  <video
-                    controls
-                    src={m.mediaUrl}
-                    style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
-                  />
-                )}
-                {m.mediaUrl && m.type === "VOICE" && (
-                  <audio controls src={m.mediaUrl} style={{ width: "100%", marginBottom: 6 }} />
-                )}
+                <div
+                  style={{
+                    background: m.sender === "ME" ? "#0068ff" : "#ffffff",
+                    color: m.sender === "ME" ? "#ffffff" : "#1e293b",
+                    padding: "10px 16px",
+                    borderRadius: 16,
+                    borderBottomRightRadius: m.sender === "ME" ? 2 : 16,
+                    borderBottomLeftRadius: m.sender === "OTHER" ? 2 : 16,
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                    position: "relative",
+                  }}
+                >
+                  {/* Media Content (Ảnh / Video / Audio) */}
+                  {m.mediaUrl && m.type === "IMAGE" && (
+                    <img
+                      src={m.mediaUrl}
+                      alt="Media Attachment"
+                      onClick={() => setPreviewImage(m.mediaUrl || null)}
+                      style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
+                    />
+                  )}
+                  {m.mediaUrl && m.type === "VIDEO" && (
+                    <video
+                      controls
+                      src={m.mediaUrl}
+                      style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
+                    />
+                  )}
+                  {m.mediaUrl && m.type === "VOICE" && (
+                    <audio controls src={m.mediaUrl} style={{ width: "100%", marginBottom: 6 }} />
+                  )}
 
-                {/* Text Content */}
-                {m.textContent && (
-                  <div style={{ fontSize: 14, lineHeight: 1.5, wordBreak: "break-word" }}>{m.textContent}</div>
-                )}
+                  {/* Clean Text Content (Đã bóc tách reaction rác) */}
+                  {m.textContent && (
+                    <div style={{ fontSize: 14, lineHeight: 1.5, wordBreak: "break-word" }}>{m.textContent}</div>
+                  )}
 
-                <div style={{ fontSize: 10, color: m.sender === "ME" ? "rgba(255,255,255,0.75)" : "#94a3b8", marginTop: 4, textAlign: "right" }}>
-                  {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {m.sender === "ME" && (m.status === "SENDING" ? "⏳" : "✓✓")}
+                  <div style={{ fontSize: 10, color: m.sender === "ME" ? "rgba(255,255,255,0.75)" : "#94a3b8", marginTop: 4, textAlign: "right" }}>
+                    {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {m.sender === "ME" && (m.status === "SENDING" ? "⏳" : "✓✓")}
+                  </div>
                 </div>
+
+                {/* Huy hiệu Reaction có cấu trúc (Structured Reaction Badges) */}
+                {m.reactions && m.reactions.length > 0 && (
+                  <div style={{ display: "flex", gap: 4, marginTop: -6, zIndex: 2, paddingLeft: m.sender === "ME" ? 0 : 8, paddingRight: m.sender === "ME" ? 8 : 0 }}>
+                    {m.reactions.map((r, rIdx) => (
+                      <span
+                        key={rIdx}
+                        style={{
+                          background: "#ffffff",
+                          border: "1px solid #e2e8f0",
+                          borderRadius: 12,
+                          padding: "2px 6px",
+                          fontSize: 11,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 3,
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+                        }}
+                      >
+                        <span>{r.emoji}</span>
+                        {r.count > 1 && <span style={{ fontWeight: 600, color: "#64748b" }}>{r.count}</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))
           )}

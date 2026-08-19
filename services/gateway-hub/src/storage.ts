@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { Readable } from "stream";
+import { ParsedReaction, cleanMessageContent } from "./normalizer.js";
 
 export interface StoredMessage {
   msgId: string;
@@ -17,6 +18,7 @@ export interface StoredMessage {
   mediaName?: string;
   mediaSize?: number;
   localMediaPath?: string;
+  reactions?: ParsedReaction[];
 }
 
 export interface StoredConversation {
@@ -35,7 +37,6 @@ const MEDIA_DIR = path.join(DATA_DIR, "media");
 const MESSAGES_FILE = path.join(DATA_DIR, "messages.json");
 const CONVERSATIONS_FILE = path.join(DATA_DIR, "conversations.json");
 
-// Đảm bảo thư mục lưu trữ volume tồn tại
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
 fs.mkdirSync(path.join(MEDIA_DIR, "images"), { recursive: true });
@@ -57,10 +58,20 @@ export class ServerStorageEngine {
       if (fs.existsSync(MESSAGES_FILE)) {
         const raw = fs.readFileSync(MESSAGES_FILE, "utf-8");
         this.messages = JSON.parse(raw);
-        console.log(`[Storage] Loaded ${this.messages.length} messages from server volume.`);
+        // Tự động làm sạch các tin nhắn rác đã lưu trong quá khứ
+        for (const m of this.messages) {
+          if (m.textContent) {
+            const cleaned = cleanMessageContent(m.textContent);
+            m.textContent = cleaned.cleanText;
+            if (cleaned.reactions.length > 0 && (!m.reactions || m.reactions.length === 0)) {
+              m.reactions = cleaned.reactions;
+            }
+          }
+        }
+        console.log(`[Storage] Loaded & Sanitized ${this.messages.length} messages from server volume.`);
       }
     } catch (e) {
-      console.warn("[Storage Warning] Could not parse messages.json, starting empty:", e);
+      console.warn("[Storage Warning] Could not parse messages.json:", e);
       this.messages = [];
     }
 
@@ -74,11 +85,11 @@ export class ServerStorageEngine {
         console.log(`[Storage] Loaded ${this.conversations.size} conversations from server volume.`);
       }
     } catch (e) {
-      console.warn("[Storage Warning] Could not parse conversations.json, starting empty:", e);
+      console.warn("[Storage Warning] Could not parse conversations.json:", e);
     }
   }
 
-  private async flushToDisk() {
+  public flushToDisk() {
     if (this.isSaving) return;
     this.isSaving = true;
     try {
@@ -97,7 +108,6 @@ export class ServerStorageEngine {
     }
   }
 
-  // Tự động tải media (ảnh, video, âm thanh) về lưu thẳng vào server volume
   public async downloadAndPersistMedia(remoteUrl: string, mediaType: string = "IMAGE"): Promise<string> {
     if (!remoteUrl || remoteUrl.startsWith("/api/media/") || remoteUrl.startsWith("/media/")) {
       return remoteUrl;
@@ -116,7 +126,6 @@ export class ServerStorageEngine {
       const filename = `${subFolder}/${hash}${ext}`;
       const fullPath = path.join(MEDIA_DIR, filename);
 
-      // Nếu file đã tồn tại trên volume, không cần tải lại
       if (fs.existsSync(fullPath) && fs.statSync(fullPath).size > 0) {
         return `/api/media/${filename}`;
       }
@@ -134,18 +143,22 @@ export class ServerStorageEngine {
 
       const buffer = Buffer.from(await res.arrayBuffer());
       fs.writeFileSync(fullPath, buffer);
-      console.log(`[Storage] 💾 Media saved permanently to server volume: ${filename} (${buffer.length} bytes)`);
-
       return `/api/media/${filename}`;
     } catch (e) {
-      console.warn(`[Storage Warning] Failed to download media from ${remoteUrl}:`, e);
       return remoteUrl;
     }
   }
 
-  // Lưu tin nhắn mới vào volume
   public async addMessage(msg: StoredMessage): Promise<StoredMessage> {
-    // Nếu có media URL từ Zalo Cloud, tải và lưu về volume ngay
+    // Làm sạch nội dung văn bản và bóc tách reaction
+    if (msg.textContent) {
+      const cleaned = cleanMessageContent(msg.textContent);
+      msg.textContent = cleaned.cleanText;
+      if (cleaned.reactions.length > 0) {
+        msg.reactions = cleaned.reactions;
+      }
+    }
+
     if (msg.mediaUrl && !msg.mediaUrl.startsWith("/api/media/")) {
       msg.mediaUrl = await this.downloadAndPersistMedia(msg.mediaUrl, msg.type);
     }
@@ -161,7 +174,9 @@ export class ServerStorageEngine {
     const conv = this.conversations.get(msg.conversationId);
     if (conv) {
       conv.lastMessage = msg.textContent || `[${msg.type}]`;
-      conv.lastTimestamp = msg.timestamp;
+      if (msg.timestamp > conv.lastTimestamp) {
+        conv.lastTimestamp = msg.timestamp;
+      }
       this.conversations.set(msg.conversationId, conv);
     }
 
@@ -169,11 +184,14 @@ export class ServerStorageEngine {
     return msg;
   }
 
-  public getMessages(conversationId?: string, limit: number = 100): StoredMessage[] {
+  public getMessages(conversationId?: string, limit: number = 500): StoredMessage[] {
     if (conversationId) {
-      return this.messages.filter((m) => m.conversationId === conversationId).slice(-limit);
+      return this.messages
+        .filter((m) => m.conversationId === conversationId)
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(-limit);
     }
-    return this.messages.slice(-limit);
+    return this.messages.sort((a, b) => a.timestamp - b.timestamp).slice(-limit);
   }
 
   public saveConversations(convs: StoredConversation[]) {
@@ -192,7 +210,6 @@ export class ServerStorageEngine {
     return Array.from(this.conversations.values()).sort((a, b) => b.lastTimestamp - a.lastTimestamp);
   }
 
-  // Lấy stream file media từ server volume
   public getMediaFile(relativeFilename: string): { stream: Readable; mimeType: string; size: number } | null {
     const fullPath = path.join(MEDIA_DIR, relativeFilename);
     if (!fs.existsSync(fullPath)) {
