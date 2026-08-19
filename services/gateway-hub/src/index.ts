@@ -53,8 +53,8 @@ function getCdpJson(host: string, port: number, path: string): Promise<any> {
   });
 }
 
-// Helper thực thi script trên Zalo Web qua CDP Runtime.evaluate
-async function evalCdp(script: string): Promise<any> {
+// Helper gửi lệnh CDP bất kỳ tới tab active của Chromium
+async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
   const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
   const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
   const cdpPort = parseInt(cdpPortStr || "9222", 10);
@@ -63,7 +63,7 @@ async function evalCdp(script: string): Promise<any> {
   const pageTarget = targets.find((t: any) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
 
   if (!pageTarget || !pageTarget.webSocketDebuggerUrl) {
-    throw new Error("Không tìm thấy page target");
+    throw new Error("Không tìm thấy active page target trong Chromium");
   }
 
   let wsUrl = pageTarget.webSocketDebuggerUrl as string;
@@ -76,19 +76,17 @@ async function evalCdp(script: string): Promise<any> {
 
     const timeout = setTimeout(() => {
       try { ws.close(); } catch {}
-      reject(new Error("CDP Evaluate timeout"));
-    }, 5000);
+      reject(new Error(`CDP ${method} timed out`));
+    }, 6000);
+
+    const cmdId = Math.floor(Math.random() * 100000);
 
     ws.on("open", () => {
       ws.send(
         JSON.stringify({
-          id: 200,
-          method: "Runtime.evaluate",
-          params: {
-            expression: script,
-            returnByValue: true,
-            awaitPromise: true,
-          },
+          id: cmdId,
+          method: method,
+          params: params,
         })
       );
     });
@@ -96,10 +94,10 @@ async function evalCdp(script: string): Promise<any> {
     ws.on("message", (raw) => {
       try {
         const resp = JSON.parse(raw.toString());
-        if (resp.id === 200) {
+        if (resp.id === cmdId) {
           clearTimeout(timeout);
           try { ws.close(); } catch {}
-          resolve(resp.result?.result?.value);
+          resolve(resp.result);
         }
       } catch (e) {
         clearTimeout(timeout);
@@ -115,7 +113,23 @@ async function evalCdp(script: string): Promise<any> {
   });
 }
 
-// Khởi tạo HTTP Server phục vụ endpoint /qr, /api/conversations, /api/sync và WebSocket Upgrade
+// Helper parse JSON body từ HTTP Request
+function parseBody(req: http.IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch (e) {
+        resolve({});
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+// Khởi tạo HTTP Server
 const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -128,110 +142,113 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 1. Endpoint lấy trực tiếp ảnh chụp màn hình mã QR / Giao diện Zalo
+  // 1. Endpoint lấy ảnh màn hình Zalo (`/qr` hoặc `/api/qr`)
   if (req.url?.startsWith("/qr") || req.url?.startsWith("/api/qr")) {
     try {
-      const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
-      const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
-      const cdpPort = parseInt(cdpPortStr || "9222", 10);
-
-      let targets = await getCdpJson(cdpHost, cdpPort, "/json").catch(async () => {
-        return getCdpJson(cdpHost, cdpPort, "/json/new?https://chat.zalo.me");
-      });
-
-      if (!Array.isArray(targets)) {
-        targets = [targets];
-      }
-
-      const pageTarget = targets.find((t: any) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
-
-      if (!pageTarget || !pageTarget.webSocketDebuggerUrl) {
-        res.writeHead(503, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Chromium đang khởi động, vui lòng thử lại sau vài giây." }));
+      const result = await sendCdpCommand("Page.captureScreenshot", { format: "png", quality: 90 });
+      if (result?.data) {
+        const imgBuffer = Buffer.from(result.data, "base64");
+        res.writeHead(200, {
+          "Content-Type": "image/png",
+          "Content-Length": imgBuffer.length,
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+        });
+        res.end(imgBuffer);
         return;
       }
-
-      let wsUrl = pageTarget.webSocketDebuggerUrl as string;
-      wsUrl = wsUrl.replace(/^ws:\/\/[^/]+/, `ws://${cdpHost}:${cdpPort}`);
-
-      const cdpWs = new WebSocket(wsUrl, {
-        headers: { Host: `localhost:${cdpPort}` },
-      });
-
-      let responded = false;
-      const timeoutId = setTimeout(() => {
-        if (!responded) {
-          responded = true;
-          try { cdpWs.close(); } catch {}
-          res.writeHead(504, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Quá thời gian chụp màn hình từ Chromium (Timeout)." }));
-        }
-      }, 7000);
-
-      cdpWs.on("open", () => {
-        cdpWs.send(
-          JSON.stringify({
-            id: 100,
-            method: "Page.captureScreenshot",
-            params: { format: "png", quality: 90 },
-          })
-        );
-      });
-
-      cdpWs.on("message", (raw) => {
-        if (responded) return;
-        try {
-          const resp = JSON.parse(raw.toString());
-          if (resp.id === 100 && resp.result?.data) {
-            responded = true;
-            clearTimeout(timeoutId);
-            const imgBuffer = Buffer.from(resp.result.data, "base64");
-            res.writeHead(200, {
-              "Content-Type": "image/png",
-              "Content-Length": imgBuffer.length,
-              "Cache-Control": "no-store, no-cache, must-revalidate",
-            });
-            res.end(imgBuffer);
-            try { cdpWs.close(); } catch {}
-          }
-        } catch (e) {
-          if (!responded) {
-            responded = true;
-            clearTimeout(timeoutId);
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Lỗi giải mã ảnh từ Chromium." }));
-            try { cdpWs.close(); } catch {}
-          }
-        }
-      });
-
-      cdpWs.on("error", (err) => {
-        if (!responded) {
-          responded = true;
-          clearTimeout(timeoutId);
-          res.writeHead(502, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: `Lỗi kết nối CDP (${wsUrl}): ${err.message}` }));
-        }
-      });
-    } catch (error: any) {
       res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: `Lỗi hệ thống: ${error?.message || error}` }));
+      res.end(JSON.stringify({ error: "Không nhận được frame ảnh từ Chromium" }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message || e }));
     }
     return;
   }
 
-  // 2. Endpoint trích xuất danh sách hội thoại từ Zalo Web (`/api/conversations`)
+  // 2. Endpoint Tương tác Chuột (Mouse Click) trực tiếp vào Chromium (`/api/action/click`)
+  if (req.url === "/api/action/click" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const x = Math.round(Number(body.x) || 0);
+      const y = Math.round(Number(body.y) || 0);
+
+      // Gửi mousePressed rồi mouseReleased
+      await sendCdpCommand("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        clickCount: 1,
+        x: x,
+        y: y,
+      });
+
+      await sendCdpCommand("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        clickCount: 1,
+        x: x,
+        y: y,
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, message: `Clicked at (${x}, ${y})` }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: e.message }));
+    }
+    return;
+  }
+
+  // 3. Endpoint Gõ văn bản / Gửi tin nhắn thực tế qua Chromium (`/api/action/type`)
+  if (req.url === "/api/action/type" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const text = String(body.text || "");
+      const pressEnter = Boolean(body.pressEnter !== false);
+
+      if (text) {
+        // Nhập văn bản qua Input.insertText
+        await sendCdpCommand("Input.insertText", { text: text });
+
+        if (pressEnter) {
+          // Nhấn Enter
+          await sendCdpCommand("Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            key: "Enter",
+            code: "Enter",
+            windowsVirtualKeyCode: 13,
+            nativeVirtualKeyCode: 13,
+            unmodifiedText: "\r",
+            text: "\r",
+          });
+          await sendCdpCommand("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "Enter",
+            code: "Enter",
+            windowsVirtualKeyCode: 13,
+            nativeVirtualKeyCode: 13,
+          });
+        }
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, message: `Inserted text: ${text}` }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: e.message }));
+    }
+    return;
+  }
+
+  // 4. Endpoint trích xuất danh sách hội thoại từ Zalo Web (`/api/conversations`)
   if (req.url === "/api/conversations" || req.url === "/conversations") {
     try {
       const script = `
         (() => {
           const items = [];
-          // Trích xuất các conversation item trong sidebar
           const convElements = document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item, div[id^="conv-item-"]');
           convElements.forEach((el, idx) => {
             const nameEl = el.querySelector('.conv-item-title__name, .name, [class*="name"], [class*="title"], span[title]');
             const msgEl = el.querySelector('.conv-message, .msg, [class*="message"], [class*="last-msg"], [class*="truncate"]');
-            const timeEl = el.querySelector('.time, [class*="time"]');
             const imgEl = el.querySelector('img');
             
             const name = nameEl ? nameEl.textContent.trim() : (el.getAttribute('title') || "");
@@ -252,9 +269,14 @@ const server = http.createServer(async (req, res) => {
         })()
       `;
 
-      const conversations = await evalCdp(script).catch(() => []);
+      const result = await sendCdpCommand("Runtime.evaluate", {
+        expression: script,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(conversations || []));
+      res.end(JSON.stringify(result?.result?.value || []));
     } catch (e: any) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify([]));
@@ -262,7 +284,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. Endpoint nhấn nút "Đồng bộ tin nhắn gần đây" trên Zalo Web (`/api/sync`)
+  // 5. Endpoint tự động kích hoạt nút Đồng bộ tin nhắn trên Zalo Web (`/api/sync`)
   if (req.url === "/api/sync" || req.url === "/sync") {
     try {
       const script = `
@@ -272,14 +294,19 @@ const server = http.createServer(async (req, res) => {
           );
           if (syncBtn) {
             syncBtn.click();
-            return { success: true, message: "Đã gửi lệnh kích hoạt đồng bộ tin nhắn trên Zalo Web." };
+            return { success: true, message: "Đã click nút 'Nhấn để đồng bộ ngay' trên Zalo Web." };
           }
           return { success: false, message: "Không tìm thấy nút đồng bộ (có thể đã đồng bộ xong)." };
         })()
       `;
-      const result = await evalCdp(script).catch((e) => ({ success: false, message: e.message }));
+      const result = await sendCdpCommand("Runtime.evaluate", {
+        expression: script,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result));
+      res.end(JSON.stringify(result?.result?.value || { success: false }));
     } catch (e: any) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: e.message }));
@@ -287,7 +314,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 4. Health check
+  // 6. Health check
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "OK", activeClients: connectedClients.size }));
@@ -305,7 +332,7 @@ wss.on("connection", (ws: WebSocket) => {
   connectedClients.add(ws);
   console.log(`Client connected. Total active sub-clients: ${connectedClients.size}`);
 
-  ws.on("message", (raw: Buffer) => {
+  ws.on("message", async (raw: Buffer) => {
     try {
       const msg: ClientMessage = JSON.parse(raw.toString("utf-8"));
 
@@ -349,6 +376,33 @@ wss.on("connection", (ws: WebSocket) => {
             client.send(broadcastPayload);
           }
         }
+
+        // 3. TỰ ĐỘNG GỬI TIN NHẮN THẬT VÀO CHROMIUM ZALO WEB QUA CDP
+        if (msg.textContent) {
+          try {
+            // Tự động gõ text và bấm Enter vào khung chat đang mở của Zalo Web
+            await sendCdpCommand("Input.insertText", { text: msg.textContent });
+            await sendCdpCommand("Input.dispatchKeyEvent", {
+              type: "rawKeyDown",
+              key: "Enter",
+              code: "Enter",
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13,
+              unmodifiedText: "\r",
+              text: "\r",
+            });
+            await sendCdpCommand("Input.dispatchKeyEvent", {
+              type: "keyUp",
+              key: "Enter",
+              code: "Enter",
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13,
+            });
+            console.log(`[CDP Auto-Send] Sent message to real Zalo Web: ${msg.textContent}`);
+          } catch (cdpErr) {
+            console.warn(`[CDP Auto-Send Warning] Could not inject text into Chromium:`, cdpErr);
+          }
+        }
       } else if (msg.type === "PING") {
         ws.send(JSON.stringify({ type: "PONG", timestamp: Date.now() }));
       }
@@ -366,5 +420,5 @@ wss.on("connection", (ws: WebSocket) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
   console.log(`📷 Live QR Screenshot endpoint ready at http://0.0.0.0:${PORT}/qr`);
-  console.log(`💬 Live Conversations API ready at http://0.0.0.0:${PORT}/api/conversations`);
+  console.log(`🖱️ Interactive CDP Mouse & Keyboard API ready at /api/action/click and /api/action/type`);
 });
