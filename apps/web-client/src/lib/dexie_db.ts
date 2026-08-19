@@ -14,7 +14,7 @@ export interface LocalMessage {
   senderAvatar?: string;
   status: MessageStatus;
   timestamp: number;
-  type: MessageType;
+  type?: MessageType;
   mediaUrl?: string;
   mediaName?: string;
   mediaSize?: number;

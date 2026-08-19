@@ -40,6 +40,7 @@ export default function ChatDashboard() {
               sender: "OTHER",
               status: "DELIVERED",
               timestamp: data.hlc?.physicalTime || Date.now(),
+              type: "TEXT",
             });
           }
         } catch (e) {
@@ -68,6 +69,7 @@ export default function ChatDashboard() {
       sender: "ME",
       status: "SENDING",
       timestamp: now,
+      type: "TEXT",
     });
 
     // 2. Gửi qua WebSocket
