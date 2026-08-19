@@ -250,7 +250,7 @@ export default function ZaloMultiDeviceApp() {
         const liveConvs: Conversation[] = await res.json();
         if (liveConvs && liveConvs.length > 0) {
           for (const conv of liveConvs) {
-            await db.conversations.put(conv);
+            try { await db.conversations.put(conv); } catch {}
           }
           if (!activeConvId && liveConvs[0]) {
             setActiveConvId(liveConvs[0].id);
@@ -271,20 +271,22 @@ export default function ZaloMultiDeviceApp() {
         const msgs: LocalMessage[] = await res.json();
         if (msgs && msgs.length > 0) {
           for (const msg of msgs) {
-            await db.messages.put({
-              msgId: msg.msgId,
-              conversationId: msg.conversationId || convId,
-              textContent: msg.textContent,
-              sender: msg.sender,
-              status: msg.status || "DELIVERED",
-              timestamp: msg.timestamp,
-              type: msg.type || "TEXT",
-              mediaUrl: msg.mediaUrl,
-              mediaName: msg.mediaName,
-              mediaSize: msg.mediaSize,
-              reactions: msg.reactions,
-              mentions: msg.mentions,
-            });
+            try {
+              await db.messages.put({
+                msgId: msg.msgId,
+                conversationId: msg.conversationId || convId,
+                textContent: msg.textContent,
+                sender: msg.sender,
+                status: msg.status || "DELIVERED",
+                timestamp: msg.timestamp,
+                type: msg.type || "TEXT",
+                mediaUrl: msg.mediaUrl,
+                mediaName: msg.mediaName,
+                mediaSize: msg.mediaSize,
+                reactions: msg.reactions,
+                mentions: msg.mentions,
+              });
+            } catch {}
           }
         }
       }
@@ -353,25 +355,27 @@ export default function ZaloMultiDeviceApp() {
           // XỬ LÝ TIN NHẮN REALTIME
           if (data.event === "MESSAGE_FANOUT") {
             const convId = data.conversationId || activeConvId || "conv_1";
-            await db.messages.add({
-              msgId: data.msgId,
-              conversationId: convId,
-              textContent: data.textContent,
-              sender: data.sender || "OTHER",
-              status: "DELIVERED",
-              timestamp: data.hlc?.physicalTime || Date.now(),
-              type: data.type || "TEXT",
-              mediaUrl: data.mediaUrl,
-              mediaName: data.mediaName,
-              mediaSize: data.mediaSize,
-              reactions: data.reactions,
-              mentions: data.mentions,
-            });
+            try {
+              await db.messages.put({
+                msgId: data.msgId,
+                conversationId: convId,
+                textContent: data.textContent,
+                sender: data.sender || "OTHER",
+                status: "DELIVERED",
+                timestamp: data.hlc?.physicalTime || Date.now(),
+                type: data.type || "TEXT",
+                mediaUrl: data.mediaUrl,
+                mediaName: data.mediaName,
+                mediaSize: data.mediaSize,
+                reactions: data.reactions,
+                mentions: data.mentions,
+              });
 
-            await db.conversations.update(convId, {
-              lastMessage: data.textContent || `[${data.type || "Media"}]`,
-              lastTimestamp: Date.now(),
-            });
+              await db.conversations.update(convId, {
+                lastMessage: data.textContent || `[${data.type || "Media"}]`,
+                lastTimestamp: Date.now(),
+              });
+            } catch {}
           }
         } catch (e) {
           console.error("Failed to parse websocket frame:", e);
@@ -396,20 +400,22 @@ export default function ZaloMultiDeviceApp() {
     const now = Date.now();
     const targetConvId = activeConvId || "conv_1";
 
-    await db.messages.add({
-      msgId: tempMsgId,
-      conversationId: targetConvId,
-      textContent: inputText,
-      sender: "ME",
-      status: "SENDING",
-      timestamp: now,
-      type: "TEXT",
-    });
+    try {
+      await db.messages.put({
+        msgId: tempMsgId,
+        conversationId: targetConvId,
+        textContent: inputText,
+        sender: "ME",
+        status: "SENDING",
+        timestamp: now,
+        type: "TEXT",
+      });
 
-    await db.conversations.update(targetConvId, {
-      lastMessage: `Bạn: ${inputText}`,
-      lastTimestamp: now,
-    });
+      await db.conversations.update(targetConvId, {
+        lastMessage: `Bạn: ${inputText}`,
+        lastTimestamp: now,
+      });
+    } catch {}
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -452,18 +458,20 @@ export default function ZaloMultiDeviceApp() {
         if (res.ok) {
           const result = await res.json();
           if (result.message) {
-            await db.messages.put({
-              msgId: result.message.msgId,
-              conversationId: targetConvId,
-              textContent: result.message.textContent,
-              sender: "ME",
-              status: "DELIVERED",
-              timestamp: Date.now(),
-              type: file.type.startsWith("image/") ? "IMAGE" : "FILE",
-              mediaUrl: result.message.mediaUrl,
-              mediaName: file.name,
-              mediaSize: file.size,
-            });
+            try {
+              await db.messages.put({
+                msgId: result.message.msgId,
+                conversationId: targetConvId,
+                textContent: result.message.textContent,
+                sender: "ME",
+                status: "DELIVERED",
+                timestamp: Date.now(),
+                type: file.type.startsWith("image/") ? "IMAGE" : "FILE",
+                mediaUrl: result.message.mediaUrl,
+                mediaName: file.name,
+                mediaSize: file.size,
+              });
+            } catch {}
           }
         }
         setUploading(false);
@@ -485,7 +493,6 @@ export default function ZaloMultiDeviceApp() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "START_LIVE_SYNC" }));
     } else {
-      // Fallback REST call nếu WebSocket chưa kịp sẵn sàng
       fetch("/api/sync/full-resync", { method: "POST" })
         .then((res) => res.json())
         .then(async (dumpResult) => {
@@ -812,7 +819,7 @@ export default function ZaloMultiDeviceApp() {
               {/* Modal Footer */}
               <div style={{ padding: "14px 20px", background: "#0f172a", borderTop: "1px solid #334155", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{ fontSize: 12, color: "#64748b" }}>
-                  {isFullSyncing ? "⚡ Đang cào dữ liệu & lưu vĩnh viễn vào Server Volume..." : "Dữ liệu đã được nạp $100\%$ vào PWA."}
+                  {isFullSyncing ? "⚡ Đang cào dữ liệu & lưu vĩnh viễn vào Server Volume..." : "Dữ liệu đã được nạp 100% vào PWA."}
                 </span>
                 <button
                   onClick={() => setShowSyncModal(false)}

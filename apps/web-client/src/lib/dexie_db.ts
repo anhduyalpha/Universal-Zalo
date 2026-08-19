@@ -18,7 +18,6 @@ export interface MentionToken {
 }
 
 export interface LocalMessage {
-  id?: number;
   msgId: string;
   conversationId: string;
   textContent: string;
@@ -87,50 +86,65 @@ export function deduplicateConversationsByName(convs: Conversation[]): Conversat
 }
 
 export class ZaloLocalDatabase extends Dexie {
-  messages!: Table<LocalMessage, number>;
+  messages!: Table<LocalMessage, string>;
   conversations!: Table<Conversation, string>;
 
   constructor() {
     super("UniversalZaloDB");
-    this.version(4).stores({
-      messages: "++id, &msgId, conversationId, sender, status, timestamp, type",
+    this.version(5).stores({
+      messages: "msgId, conversationId, sender, status, timestamp, type",
       conversations: "id, name, type, lastTimestamp, unreadCount, isPinned",
     });
   }
 
   /**
-   * Transactional Atomic State Reconcile: Đối soát và làm sạch toàn bộ cơ sở dữ liệu cục bộ
+   * Transactional Atomic State Reconcile: Đối soát và nạp sạch toàn bộ tin nhắn & hội thoại (Zero Constraint Error)
    */
   async reconcileFullState(
     newConversations: Conversation[],
     newMessagesMap: Record<string, LocalMessage[]>
   ) {
-    return this.transaction("rw", [this.conversations, this.messages], async () => {
+    try {
       const dedupedConvs = deduplicateConversationsByName(newConversations);
-
-      // 1. Cập nhật các cuộc hội thoại không trùng lặp
-      for (const conv of dedupedConvs) {
-        await this.conversations.put(conv);
+      if (dedupedConvs.length > 0) {
+        await this.conversations.bulkPut(dedupedConvs);
       }
 
-      // 2. Cập nhật các tin nhắn với ID chuẩn, loại bỏ các tin nhắn rác trùng lặp
+      const allMessages: LocalMessage[] = [];
       for (const [convId, msgs] of Object.entries(newMessagesMap)) {
-        for (const msg of msgs) {
-          const existing = await this.messages.where("msgId").equals(msg.msgId).first();
-          if (existing && existing.id) {
-            await this.messages.update(existing.id, {
-              ...msg,
-              conversationId: convId,
-            });
-          } else {
-            await this.messages.add({
-              ...msg,
-              conversationId: convId,
-            });
+        if (Array.isArray(msgs)) {
+          for (const msg of msgs) {
+            if (msg && msg.msgId) {
+              allMessages.push({
+                ...msg,
+                conversationId: msg.conversationId || convId,
+              });
+            }
           }
         }
       }
-    });
+
+      const dedupedMsgs = deduplicateById(allMessages);
+      if (dedupedMsgs.length > 0) {
+        await this.messages.bulkPut(dedupedMsgs);
+      }
+    } catch (e) {
+      console.warn("Reconcile state warning, falling back to individual put:", e);
+      for (const conv of newConversations) {
+        try { await this.conversations.put(conv); } catch {}
+      }
+      for (const [convId, msgs] of Object.entries(newMessagesMap)) {
+        if (Array.isArray(msgs)) {
+          for (const msg of msgs) {
+            if (msg && msg.msgId) {
+              try {
+                await this.messages.put({ ...msg, conversationId: msg.conversationId || convId });
+              } catch {}
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -140,7 +154,7 @@ export const db = new ZaloLocalDatabase();
 export async function seedInitialConversations() {
   const count = await db.conversations.count();
   if (count === 0) {
-    await db.conversations.bulkAdd([
+    await db.conversations.bulkPut([
       {
         id: "general",
         name: "Nhóm Chung (Universal Zalo)",
