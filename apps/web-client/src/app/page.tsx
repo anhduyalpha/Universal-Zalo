@@ -16,14 +16,9 @@ export default function ChatDashboard() {
 
   const messages = useLiveQuery(() => db.messages.orderBy("timestamp").toArray(), []) || [];
 
-  // Tự động phát hiện Host để kết nối WebSocket và lấy QR
-  const [hubHost, setHubHost] = useState("127.0.0.1");
-
   useEffect(() => {
     if (typeof window !== "undefined") {
       const hostname = window.location.hostname || "127.0.0.1";
-      setHubHost(hostname);
-
       const wsUrl = `ws://${hostname}:8080`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -131,18 +126,18 @@ export default function ChatDashboard() {
             <div style={{ minHeight: 300, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#f9fafb", borderRadius: 12, overflow: "hidden", border: "1px solid #e5e7eb", position: "relative" }}>
               {qrLoading && (
                 <div style={{ padding: 20, color: "#0068ff", fontSize: 14, fontWeight: 500 }}>
-                  ⏳ Đang tải ảnh mã QR từ Server...
+                  ⏳ Đang chụp màn hình mã QR từ Server...
                 </div>
               )}
               {qrError && (
                 <div style={{ padding: 20, color: "#ef4444", fontSize: 13 }}>
                   ⚠️ {qrError}
                   <br />
-                  <small style={{ color: "#6b7280" }}>Hãy kiểm tra xem container zalo-chromium đã khởi động xong chưa.</small>
+                  <small style={{ color: "#6b7280" }}>Chromium có thể đang tải trang chat.zalo.me, hãy bấm "Làm mới ảnh".</small>
                 </div>
               )}
               <img
-                src={`http://${hubHost}:8080/qr?t=${qrTimestamp}`}
+                src={`/api/qr?t=${qrTimestamp}`}
                 alt="Zalo QR Code Live"
                 style={{ width: "100%", height: "auto", display: qrError ? "none" : "block" }}
                 onLoad={() => {
@@ -151,7 +146,7 @@ export default function ChatDashboard() {
                 }}
                 onError={() => {
                   setQrLoading(false);
-                  setQrError(`Không thể kết nối đến http://${hubHost}:8080/qr`);
+                  setQrError("Chưa thể tải ảnh mã QR. Hãy bấm Làm mới.");
                 }}
               />
             </div>

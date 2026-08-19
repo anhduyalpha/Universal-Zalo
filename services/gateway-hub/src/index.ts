@@ -16,6 +16,43 @@ const limiter = new TokenBucketLimiter(10, 4);
 const hlc = new HybridLogicalClock();
 const connectedClients = new Set<WebSocket>();
 
+// Helper gửi HTTP request với custom Host header để bypass Chrome DevTools Host verification
+function getCdpJson(host: string, port: number, path: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: host,
+        port: port,
+        path: path,
+        method: "GET",
+        headers: {
+          Host: `localhost:${port}`,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve(JSON.parse(data));
+            } catch (e) {
+              reject(new Error(`Invalid JSON from CDP: ${data}`));
+            }
+          } else {
+            reject(new Error(`CDP HTTP ${res.statusCode}: ${data}`));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.setTimeout(4000, () => {
+      req.destroy(new Error("CDP request timed out"));
+    });
+    req.end();
+  });
+}
+
 // Khởi tạo HTTP Server phục vụ endpoint /qr và WebSocket Upgrade
 const server = http.createServer(async (req, res) => {
   // CORS headers
@@ -31,32 +68,39 @@ const server = http.createServer(async (req, res) => {
   // 1. Endpoint lấy trực tiếp ảnh chụp màn hình mã QR Zalo
   if (req.url?.startsWith("/qr") || req.url?.startsWith("/api/qr")) {
     try {
-      const cdpHost = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
-      const targetRes = await fetch(`http://${cdpHost}/json`, {
-        headers: { Host: "localhost" },
+      const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
+      const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
+      const cdpPort = parseInt(cdpPortStr || "9222", 10);
+
+      // Gọi /json với Host: localhost để tránh lỗi Chrome DevTools 500
+      let targets = await getCdpJson(cdpHost, cdpPort, "/json").catch(async () => {
+        // Fallback thử tạo tab mới nếu chưa có
+        return getCdpJson(cdpHost, cdpPort, "/json/new?https://chat.zalo.me");
       });
 
-      if (!targetRes.ok) {
-        res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Không thể kết nối đến Chromium CDP trên server." }));
-        return;
+      if (!Array.isArray(targets)) {
+        targets = [targets];
       }
 
-      const targets = (await targetRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string; id?: string }>;
-      const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
+      const pageTarget = targets.find((t: any) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
 
       if (!pageTarget || !pageTarget.webSocketDebuggerUrl) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Không tìm thấy tab Zalo Web trong Chromium." }));
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Chromium đang khởi động, vui lòng thử lại sau vài giây." }));
         return;
       }
 
-      // THAY THẾ hostname 127.0.0.1 / localhost trong webSocketDebuggerUrl bằng cdpHost
-      let wsUrl = pageTarget.webSocketDebuggerUrl;
-      wsUrl = wsUrl.replace(/^ws:\/\/[^/]+/, `ws://${cdpHost}`);
+      // THAY THẾ hostname trong webSocketDebuggerUrl bằng cdpHost:cdpPort
+      let wsUrl = pageTarget.webSocketDebuggerUrl as string;
+      wsUrl = wsUrl.replace(/^ws:\/\/[^/]+/, `ws://${cdpHost}:${cdpPort}`);
 
-      // Kết nối CDP WebSocket để chụp màn hình
-      const cdpWs = new WebSocket(wsUrl);
+      // Kết nối CDP WebSocket với Host header chuẩn
+      const cdpWs = new WebSocket(wsUrl, {
+        headers: {
+          Host: `localhost:${cdpPort}`,
+        },
+      });
+
       let responded = false;
 
       const timeoutId = setTimeout(() => {
@@ -66,7 +110,7 @@ const server = http.createServer(async (req, res) => {
           res.writeHead(504, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Quá thời gian chụp màn hình từ Chromium (Timeout)." }));
         }
-      }, 6000);
+      }, 7000);
 
       cdpWs.on("open", () => {
         cdpWs.send(
@@ -99,7 +143,7 @@ const server = http.createServer(async (req, res) => {
             responded = true;
             clearTimeout(timeoutId);
             res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Lỗi xử lý frame ảnh từ CDP." }));
+            res.end(JSON.stringify({ error: "Lỗi giải mã ảnh từ Chromium." }));
             try { cdpWs.close(); } catch {}
           }
         }
@@ -109,8 +153,8 @@ const server = http.createServer(async (req, res) => {
         if (!responded) {
           responded = true;
           clearTimeout(timeoutId);
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: `Lỗi kết nối CDP WebSocket (${wsUrl}): ${err.message}` }));
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Lỗi kết nối CDP (${wsUrl}): ${err.message}` }));
         }
       });
     } catch (error: any) {
