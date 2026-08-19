@@ -5,13 +5,13 @@ import { HybridLogicalClock } from "./hlc.js";
 import { nanoid } from "nanoid";
 import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
 import { cleanMessageContent, ParsedReaction } from "./normalizer.js";
-import { executeFullMasterResync, scrapeConversationWithHistory, extractSidebarConversations } from "./crawler.js";
+import { executeFullMasterResync, scrapeConversationWithHistory, extractSidebarConversations, SyncProgressUpdate } from "./crawler.js";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
 interface ClientMessage {
-  type: "SEND_MESSAGE" | "PING" | "CLICK" | "TYPE" | "WHEEL" | "START_STREAM" | "SELECT_CONVERSATION";
+  type: "SEND_MESSAGE" | "PING" | "CLICK" | "TYPE" | "WHEEL" | "START_STREAM" | "SELECT_CONVERSATION" | "START_LIVE_SYNC";
   conversationId?: string;
   conversationName?: string;
   textContent?: string;
@@ -240,7 +240,7 @@ async function runBackgroundMessageIngestion() {
   } catch (e) {}
 }
 
-setInterval(runBackgroundMessageIngestion, 8000);
+setInterval(runBackgroundMessageIngestion, 12000);
 
 function parseBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -347,7 +347,6 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) {}
 
-      // Fallback SVG avatar nếu ảnh không tải được
       const svg = generateSvgAvatar(name);
       res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
       res.end(svg);
@@ -375,7 +374,14 @@ const server = http.createServer(async (req, res) => {
   if ((req.url === "/api/sync/full-resync" || req.url === "/api/sync/full") && req.method === "POST") {
     try {
       console.log("⚡ Triggering Full Master Data Resync via API...");
-      const dumpResult = await executeFullMasterResync(sendCdpCommand);
+      const dumpResult = await executeFullMasterResync(sendCdpCommand, (update) => {
+        const payload = JSON.stringify({ event: "LIVE_SYNC_PROGRESS", ...update });
+        for (const client of connectedClients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(payload);
+          }
+        }
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(dumpResult));
     } catch (e: any) {
@@ -675,6 +681,49 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
+      // KÍCH HOẠT LIVE SYNC QUA WEBSOCKET VỚI LOG STREAMING TRỰC TIẾP
+      if (msg.type === "START_LIVE_SYNC") {
+        console.log("⚡ Starting Live Sync via WebSocket...");
+        try {
+          const dumpResult = await executeFullMasterResync(sendCdpCommand, (update) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  event: "LIVE_SYNC_PROGRESS",
+                  ...update,
+                })
+              );
+            }
+          });
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                event: "LIVE_SYNC_COMPLETED",
+                dumpResult,
+              })
+            );
+          }
+        } catch (syncErr: any) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                event: "LIVE_SYNC_PROGRESS",
+                current: 0,
+                total: 0,
+                currentName: "Lỗi",
+                currentId: "error",
+                messageCount: 0,
+                percent: 100,
+                stage: "ERROR",
+                log: `❌ Lỗi: ${syncErr.message}`,
+              })
+            );
+          }
+        }
+        return;
+      }
+
       if (msg.type === "SELECT_CONVERSATION" && msg.conversationName) {
         await scrapeConversationWithHistory(sendCdpCommand, msg.conversationId || "general", msg.conversationName, 1);
         return;
@@ -863,5 +912,5 @@ wss.on("connection", (ws: WebSocket) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
-  console.log(`🖼️ Media Proxy & Fallback Avatar Engine active`);
+  console.log(`⚡ Live Sync Streaming with real-time progress active`);
 });

@@ -1,6 +1,17 @@
 import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
 import { cleanMessageContent, parseTimestamp, ParsedReaction } from "./normalizer.js";
 
+export interface SyncProgressUpdate {
+  current: number;
+  total: number;
+  currentName: string;
+  currentId: string;
+  messageCount: number;
+  percent: number;
+  stage: "STARTING" | "EXTRACTING_SIDEBAR" | "SCRAPING_CONVERSATION" | "SANITIZING" | "COMPLETED" | "ERROR";
+  log: string;
+}
+
 export interface MasterDumpResult {
   success: boolean;
   totalConversations: number;
@@ -20,7 +31,6 @@ export async function extractSidebarConversations(sendCdpCommand: (method: strin
       const convElements = document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item, div[id^="conv-item-"]');
       
       convElements.forEach((el, idx) => {
-        // Chỉ lấy tiêu đề trong phần header của item, loại trừ người gửi trong .conv-message
         const titleContainer = el.querySelector('.conv-item-title, [class*="conv-item-title"], .conv-item-header, .title-wrap');
         const nameEl = titleContainer 
           ? titleContainer.querySelector('.conv-item-title__name, .title, span[title], div[title], [class*="title"]') || titleContainer
@@ -32,7 +42,6 @@ export async function extractSidebarConversations(sendCdpCommand: (method: strin
         const unreadEl = el.querySelector('.unread-badge, [class*="unread"], .badge');
         
         let rawName = nameEl ? (nameEl.getAttribute('title') || nameEl.textContent || "") : (el.getAttribute('title') || "");
-        // Chuẩn hóa ký tự khoảng trắng không ngắt \u00A0 thành khoảng trắng thông thường
         const name = rawName.replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').replace(/:$/, '').trim();
         
         if (name && name !== "Tìm kiếm" && name !== "Bạn" && !items.some(i => i.name === name)) {
@@ -83,7 +92,7 @@ export async function scrapeConversationWithHistory(
     (async () => {
       const targetName = ${escapedName}.toLowerCase();
       
-      // 1. Tìm và click chọn cuộc hội thoại trong sidebar (Chuẩn hóa \\u00A0)
+      // 1. Tìm và click chọn cuộc hội thoại trong sidebar
       const convElements = Array.from(document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item'));
       const targetEl = convElements.find(el => {
         const titleContainer = el.querySelector('.conv-item-title, [class*="conv-item-title"], .conv-item-header, .title-wrap');
@@ -223,11 +232,25 @@ export async function scrapeConversationWithHistory(
 }
 
 /**
- * Thực thi Full Master Data Resync toàn diện
+ * Thực thi Full Master Data Resync toàn diện với Live Progress Updates
  */
-export async function executeFullMasterResync(sendCdpCommand: (method: string, params?: any) => Promise<any>): Promise<MasterDumpResult> {
-  console.log("🚀 [Full Resync] Starting Full Master Session Data Dump...");
-  
+export async function executeFullMasterResync(
+  sendCdpCommand: (method: string, params?: any) => Promise<any>,
+  onProgress?: (update: SyncProgressUpdate) => void
+): Promise<MasterDumpResult> {
+  console.log("🚀 [Full Resync] Starting Full Master Session Data Dump with Live Progress...");
+
+  onProgress?.({
+    current: 0,
+    total: 100,
+    currentName: "Khởi động",
+    currentId: "init",
+    messageCount: 0,
+    percent: 5,
+    stage: "EXTRACTING_SIDEBAR",
+    log: "🔍 Đang kết nối và trích xuất danh sách hội thoại từ Zalo Web...",
+  });
+
   // 1. Lấy chuẩn xác danh sách hội thoại
   const conversations = await extractSidebarConversations(sendCdpCommand);
   if (conversations.length > 0) {
@@ -238,16 +261,64 @@ export async function executeFullMasterResync(sendCdpCommand: (method: string, p
   const messagesByConv: Record<string, StoredMessage[]> = {};
   let totalMessagesCount = 0;
 
-  // 2. Cào tin nhắn sâu cho các cuộc hội thoại
   const targetConvs = allConvs.slice(0, 15);
-  for (const conv of targetConvs) {
+  const total = targetConvs.length;
+
+  onProgress?.({
+    current: 0,
+    total: total,
+    currentName: "Danh sách hội thoại",
+    currentId: "sidebar",
+    messageCount: 0,
+    percent: 15,
+    stage: "SCRAPING_CONVERSATION",
+    log: `📋 Đã tìm thấy ${allConvs.length} cuộc hội thoại. Bắt đầu cào chi tiết từng nhóm...`,
+  });
+
+  // 2. Cào tin nhắn sâu từng cuộc trò chuyện và gửi tiến trình trực tiếp
+  for (let i = 0; i < total; i++) {
+    const conv = targetConvs[i];
+    const currentPercent = Math.round(15 + ((i + 1) / total) * 75);
+
+    onProgress?.({
+      current: i + 1,
+      total: total,
+      currentName: conv.name,
+      currentId: conv.id,
+      messageCount: totalMessagesCount,
+      percent: currentPercent,
+      stage: "SCRAPING_CONVERSATION",
+      log: `📂 [${i + 1}/${total}] Đang mở "${conv.name}" & cuộn tải lịch sử tin nhắn...`,
+    });
+
     const msgs = await scrapeConversationWithHistory(sendCdpCommand, conv.id, conv.name, 2);
     messagesByConv[conv.id] = msgs;
     totalMessagesCount += msgs.length;
-    console.log(`✅ [Full Resync] Dumped ${msgs.length} messages for "${conv.name}"`);
+
+    onProgress?.({
+      current: i + 1,
+      total: total,
+      currentName: conv.name,
+      currentId: conv.id,
+      messageCount: totalMessagesCount,
+      percent: currentPercent,
+      stage: "SANITIZING",
+      log: `✅ [${i + 1}/${total}] Đã cào & làm sạch ${msgs.length} tin nhắn cho "${conv.name}"`,
+    });
   }
 
   serverStorage.flushToDisk();
+
+  onProgress?.({
+    current: total,
+    total: total,
+    currentName: "Hoàn tất",
+    currentId: "done",
+    messageCount: totalMessagesCount,
+    percent: 100,
+    stage: "COMPLETED",
+    log: `🎉 Hoàn tất đồng bộ! Tổng cộng ${allConvs.length} cuộc hội thoại và ${totalMessagesCount} tin nhắn đã lưu vào Server Volume.`,
+  });
 
   return {
     success: true,
