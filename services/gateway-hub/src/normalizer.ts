@@ -7,13 +7,20 @@ export interface ParsedReaction {
   count: number;
 }
 
+export interface MentionToken {
+  name: string;
+  startIndex: number;
+  endIndex: number;
+}
+
 export interface SanitizedMessageResult {
   cleanText: string;
   reactions: ParsedReaction[];
+  mentions: MentionToken[];
 }
 
 // Bảng ánh xạ mã reaction/emoticon di sản của Zalo sang emoji & kiểu chuẩn
-const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: string }> = {
+export const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: string }> = {
   "/-strong": { type: "like", emoji: "👍" },
   "(y)": { type: "like", emoji: "👍" },
   "/-heart": { type: "heart", emoji: "❤️" },
@@ -25,6 +32,7 @@ const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: string 
   ":-bd": { type: "haha", emoji: "😆" },
   ":-D": { type: "haha", emoji: "😄" },
   ":D": { type: "haha", emoji: "😄" },
+  ":>:o:-(( ": { type: "cry", emoji: "😭" },
   ":>:o:-(( ": { type: "cry", emoji: "😭" },
   ":>:o:-(": { type: "cry", emoji: "😭" },
   ":-(( ": { type: "cry", emoji: "😭" },
@@ -51,19 +59,44 @@ const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: string 
   ":)": { type: "other", emoji: "🙂" },
 };
 
-// Regex nhận diện các cụm token reaction dính vào đuôi hoặc xuất hiện trong chuỗi rác
+// Bảng chuyển đổi emoticon nội dòng (Inline Emoticons) thành Unicode
+const INLINE_EMOTICON_MAP: Record<string, string> = {
+  ":-)": "🙂",
+  ":)": "🙂",
+  ":-D": "😄",
+  ":D": "😄",
+  ";-)": "😉",
+  ";)": "😉",
+  ":-*": "😘",
+  ":-P": "😛",
+  ":-p": "😛",
+  ":P": "😛",
+  ":p": "😛",
+  "B-)": "😎",
+  "b-)": "😎",
+  ":-(": "🙁",
+  ":(": "🙁",
+  ":-O": "😲",
+  ":-o": "😲",
+  "<3": "❤️",
+};
+
+// Regex nhận diện các cụm token reaction dính vào đuôi hoặc rác nối tiếp
 const TRAILING_REACTION_REGEX = /(?:\/-(?:strong|heart|fade|break|rose)|:>:o:-\(\(|:[-<()DOPSbdh*?pP]|;[-)]|\([yL]\))+$/;
 const GLOBAL_REACTION_TOKEN_REGEX = /(?:\/-(?:strong|heart|fade|break|rose)|:>:o:-\(\(|:[-<()DOPSbdh*?pP]|;[-)]|\([yL]\))/g;
 
 // Regex bảo vệ URL để không bị băm cắt link web, TikTok, Youtube
 const URL_REGEX = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
 
+// Regex phát hiện @mention (ví dụ: @Duy, @Nguyen Van A)
+const MENTION_REGEX = /@([\p{L}\p{N}_\-\.\s]{2,30})(?=\s|$|[,\.\?!])/gu;
+
 /**
- * Làm sạch nội dung tin nhắn, bóc tách toàn bộ chuỗi reaction/emoticon rác và trích xuất danh sách reaction có cấu trúc
+ * Làm sạch nội dung tin nhắn, bóc tách chuỗi reaction rác, chuyển đổi inline emoji và nhận diện @mentions
  */
 export function cleanMessageContent(rawText: string): SanitizedMessageResult {
   if (!rawText || typeof rawText !== "string") {
-    return { cleanText: "", reactions: [] };
+    return { cleanText: "", reactions: [], mentions: [] };
   }
 
   // 1. Bảo vệ tất cả URLs có trong tin nhắn bằng placeholder tạm thời
@@ -77,13 +110,12 @@ export function cleanMessageContent(rawText: string): SanitizedMessageResult {
 
   const reactionsMap = new Map<string, ParsedReaction>();
 
-  // 2. Tìm các chuỗi reaction dính vào đuôi tin nhắn (Trailing Reaction Bursts)
+  // 2. Tìm và bóc tách các chuỗi reaction dính vào đuôi tin nhắn (Trailing Reaction Bursts)
   let cleanText = protectedText.trim();
   let trailingMatch = cleanText.match(TRAILING_REACTION_REGEX);
 
   while (trailingMatch && trailingMatch.index !== undefined && trailingMatch[0]) {
     const matchedSegment = trailingMatch[0];
-    // Tìm các token đơn lẻ trong đoạn reaction đuôi này
     const tokens = matchedSegment.match(GLOBAL_REACTION_TOKEN_REGEX) || [];
     for (const token of tokens) {
       const info = ZALO_LEGACY_TOKEN_MAP[token] || { type: "other", emoji: "✨" };
@@ -100,34 +132,49 @@ export function cleanMessageContent(rawText: string): SanitizedMessageResult {
       }
     }
 
-    // Cắt bỏ đoạn reaction ở đuôi
     cleanText = cleanText.substring(0, trailingMatch.index).trim();
     trailingMatch = cleanText.match(TRAILING_REACTION_REGEX);
   }
 
-  // 3. Nếu toàn bộ tin nhắn chỉ là các token reaction đơn lẻ (không có chữ)
-  if (cleanText && cleanText.length <= 15) {
-    const onlyTokens = cleanText.match(GLOBAL_REACTION_TOKEN_REGEX);
-    if (onlyTokens && onlyTokens.join("") === cleanText.replace(/\s+/g, "")) {
-      for (const token of onlyTokens) {
-        const info = ZALO_LEGACY_TOKEN_MAP[token] || { type: "other", emoji: "✨" };
-        const key = `${info.type}_${info.emoji}`;
-        if (reactionsMap.has(key)) {
-          reactionsMap.get(key)!.count += 1;
-        } else {
-          reactionsMap.set(key, {
-            code: token,
-            type: info.type,
-            emoji: info.emoji,
-            count: 1,
-          });
-        }
+  // 3. Nếu tin nhắn chứa các token Zalo legacy dạng `/-strong`, `/-heart` ở bất kỳ vị trí nào
+  cleanText = cleanText.replace(/\/-(?:strong|heart|fade|break|rose)/g, (token) => {
+    const info = ZALO_LEGACY_TOKEN_MAP[token];
+    if (info) {
+      const key = `${info.type}_${info.emoji}`;
+      if (reactionsMap.has(key)) {
+        reactionsMap.get(key)!.count += 1;
+      } else {
+        reactionsMap.set(key, {
+          code: token,
+          type: info.type,
+          emoji: info.emoji,
+          count: 1,
+        });
       }
-      cleanText = "";
+      return "";
     }
+    return token;
+  }).trim();
+
+  // 4. Chuyển đổi các emoticons nội dòng (như :) -> 🙂) khi đứng tách biệt
+  for (const [emoticon, unicodeEmoji] of Object.entries(INLINE_EMOTICON_MAP)) {
+    const escaped = emoticon.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const inlineRegex = new RegExp(`(^|\\s)${escaped}(\\s|$)`, "g");
+    cleanText = cleanText.replace(inlineRegex, `$1${unicodeEmoji}$2`);
   }
 
-  // 4. Khôi phục lại toàn bộ URL nguyên bản
+  // 5. Trích xuất danh sách @mentions
+  const mentions: MentionToken[] = [];
+  let mentionMatch: RegExpExecArray | null;
+  while ((mentionMatch = MENTION_REGEX.exec(cleanText)) !== null) {
+    mentions.push({
+      name: mentionMatch[1].trim(),
+      startIndex: mentionMatch.index,
+      endIndex: mentionMatch.index + mentionMatch[0].length,
+    });
+  }
+
+  // 6. Khôi phục lại toàn bộ URL nguyên bản
   for (const [placeholder, originalUrl] of urlMap.entries()) {
     cleanText = cleanText.replace(placeholder, originalUrl);
   }
@@ -135,11 +182,12 @@ export function cleanMessageContent(rawText: string): SanitizedMessageResult {
   return {
     cleanText: cleanText.trim(),
     reactions: Array.from(reactionsMap.values()),
+    mentions,
   };
 }
 
 /**
- * Phân giải chuỗi thời gian thực tế từ DOM (ví dụ: "14:30", "Hôm qua 09:15", "18/08 20:00") thành Unix Epoch Timestamp (ms)
+ * Phân giải chuỗi thời gian thực tế từ DOM thành Unix Epoch Timestamp (ms)
  */
 export function parseTimestamp(
   rawTime: string | number | undefined,
@@ -158,13 +206,11 @@ export function parseTimestamp(
   }
 
   if (!rawTime || typeof rawTime !== "string") {
-    // Monotonic relative interpolation: giữ khoảng cách giữa các tin nhắn
     return now - (totalCount - fallbackIndex) * 30000;
   }
 
   const str = rawTime.trim();
 
-  // Khớp định dạng giờ phút đơn thuần: "14:35", "9:05 SA", "08:12 CH"
   const timeMatch = str.match(/(\d{1,2}):(\d{2})(?:\s*(SA|CH|AM|PM))?/i);
   if (timeMatch) {
     let hours = parseInt(timeMatch[1], 10);
@@ -184,7 +230,6 @@ export function parseTimestamp(
       d.setDate(d.getDate() - 1);
     }
 
-    // Nếu thời gian lớn hơn thời gian hiện tại thì có thể là hôm qua
     if (d.getTime() > now + 60000) {
       d.setDate(d.getDate() - 1);
     }
@@ -192,7 +237,6 @@ export function parseTimestamp(
     return d.getTime();
   }
 
-  // Khớp định dạng ngày tháng: "18/08/2026", "18/08 14:30"
   const fullDateMatch = str.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?(?:\s+(\d{1,2}):(\d{2}))?/);
   if (fullDateMatch) {
     const day = parseInt(fullDateMatch[1], 10);

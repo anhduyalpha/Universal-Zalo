@@ -257,6 +257,22 @@ function parseBody(req: http.IncomingMessage): Promise<any> {
   });
 }
 
+function generateSvgAvatar(name: string): string {
+  const cleanName = (name || "Zalo").trim();
+  const initial = cleanName.charAt(0).toUpperCase() || "Z";
+  const colors = ["#0068ff", "#10b981", "#8b5cf6", "#f59e0b", "#ec4899", "#3b82f6", "#06b6d4"];
+  let hash = 0;
+  for (let i = 0; i < cleanName.length; i++) {
+    hash = cleanName.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const color = colors[Math.abs(hash) % colors.length];
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+    <rect width="100" height="100" rx="50" fill="${color}" />
+    <text x="50" y="58" font-size="44" font-family="system-ui, sans-serif" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">${initial}</text>
+  </svg>`;
+}
+
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -298,6 +314,46 @@ const server = http.createServer(async (req, res) => {
 
   // 2. Phục vụ File Media đã lưu vĩnh viễn trên Server Volume (`/api/media/*` hoặc `/media/*`)
   if (req.url?.startsWith("/api/media/") || req.url?.startsWith("/media/")) {
+    if (req.url.startsWith("/api/media/proxy") || req.url.startsWith("/media/proxy")) {
+      const urlObj = new URL(req.url, `http://localhost:${PORT}`);
+      const targetUrl = urlObj.searchParams.get("url");
+      const name = urlObj.searchParams.get("name") || "Z";
+
+      if (!targetUrl) {
+        const svg = generateSvgAvatar(name);
+        res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+        res.end(svg);
+        return;
+      }
+
+      try {
+        const upstream = await fetch(targetUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            Referer: "https://chat.zalo.me/",
+          },
+        });
+
+        if (upstream.ok) {
+          const contentType = upstream.headers.get("Content-Type") || "image/jpeg";
+          const buffer = Buffer.from(await upstream.arrayBuffer());
+          res.writeHead(200, {
+            "Content-Type": contentType,
+            "Content-Length": buffer.length,
+            "Cache-Control": "public, max-age=31536000, immutable",
+          });
+          res.end(buffer);
+          return;
+        }
+      } catch (e) {}
+
+      // Fallback SVG avatar nếu ảnh không tải được
+      const svg = generateSvgAvatar(name);
+      res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+      res.end(svg);
+      return;
+    }
+
     const filename = req.url.replace(/^\/(api\/)?media\//, "").split("?")[0];
     const fileInfo = serverStorage.getMediaFile(filename);
     if (!fileInfo) {
@@ -368,7 +424,6 @@ const server = http.createServer(async (req, res) => {
         mediaSize: buffer.length,
       });
 
-      // Fan-out xuống PWA
       const broadcastPayload = JSON.stringify({
         event: "MESSAGE_FANOUT",
         msgId: savedMsg.msgId,
@@ -379,6 +434,7 @@ const server = http.createServer(async (req, res) => {
         type: "IMAGE",
         status: "DELIVERED",
         reactions: savedMsg.reactions,
+        mentions: savedMsg.mentions,
         hlc: hlc.now(),
       });
 
@@ -619,7 +675,6 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      // Chuyển đổi cuộc hội thoại từ PWA -> Chromium
       if (msg.type === "SELECT_CONVERSATION" && msg.conversationName) {
         await scrapeConversationWithHistory(sendCdpCommand, msg.conversationId || "general", msg.conversationName, 1);
         return;
@@ -713,7 +768,6 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      // XỬ LÝ GỬI TIN NHẮN VỚI LÀM SẠCH VÀ LƯU THẲNG SERVER VOLUME
       if (msg.type === "SEND_MESSAGE") {
         if (!limiter.tryConsume(1)) {
           ws.send(
@@ -730,10 +784,8 @@ wss.on("connection", (ws: WebSocket) => {
         const ts = hlc.now();
         const convId = msg.conversationId || "general";
 
-        // Làm sạch nội dung tin nhắn trước khi lưu
         const cleaned = cleanMessageContent(msg.textContent || "");
 
-        // 1. Lưu vĩnh viễn vào Server Volume
         const savedMsg = await serverStorage.addMessage({
           msgId,
           conversationId: convId,
@@ -744,9 +796,9 @@ wss.on("connection", (ws: WebSocket) => {
           type: msg.mediaType || (msg.mediaUrl ? "IMAGE" : "TEXT"),
           mediaUrl: msg.mediaUrl,
           reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
+          mentions: cleaned.mentions.length > 0 ? cleaned.mentions : undefined,
         });
 
-        // 2. Optimistic ACK
         ws.send(
           JSON.stringify({
             status: "OPTIMISTIC_PENDING",
@@ -756,7 +808,6 @@ wss.on("connection", (ws: WebSocket) => {
           })
         );
 
-        // 3. Fan-out xuống các Sub-Clients PWA khác
         const broadcastPayload = JSON.stringify({
           event: "MESSAGE_FANOUT",
           msgId: savedMsg.msgId,
@@ -767,6 +818,7 @@ wss.on("connection", (ws: WebSocket) => {
           type: savedMsg.type,
           status: "DELIVERED",
           reactions: savedMsg.reactions,
+          mentions: savedMsg.mentions,
           hlc: ts,
         });
 
@@ -776,7 +828,6 @@ wss.on("connection", (ws: WebSocket) => {
           }
         }
 
-        // 4. Inject tin nhắn vào Zalo Web qua CDP để gửi thật
         if (cleaned.cleanText) {
           try {
             await sendCdpCommand("Input.insertText", { text: cleaned.cleanText });
@@ -812,6 +863,5 @@ wss.on("connection", (ws: WebSocket) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
-  console.log(`🧹 Zalo Legacy Code Stripper & Reaction AST Sanitizer active`);
-  console.log(`⚡ Full Master Data Resync Pipeline active`);
+  console.log(`🖼️ Media Proxy & Fallback Avatar Engine active`);
 });

@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { Readable } from "stream";
-import { ParsedReaction, cleanMessageContent } from "./normalizer.js";
+import { ParsedReaction, MentionToken, cleanMessageContent } from "./normalizer.js";
 
 export interface StoredMessage {
   msgId: string;
@@ -19,6 +19,7 @@ export interface StoredMessage {
   mediaSize?: number;
   localMediaPath?: string;
   reactions?: ParsedReaction[];
+  mentions?: MentionToken[];
 }
 
 export interface StoredConversation {
@@ -53,22 +54,82 @@ export class ServerStorageEngine {
     this.loadFromDisk();
   }
 
+  // Khử trùng lặp danh sách tin nhắn (Deduplicate Messages by msgId or signature)
+  private deduplicateMessages(list: StoredMessage[]): StoredMessage[] {
+    const mapById = new Map<string, StoredMessage>();
+    const seenSignatures = new Set<string>();
+    const deduped: StoredMessage[] = [];
+
+    for (const m of list) {
+      if (!m.msgId) continue;
+      
+      // Tạo chữ ký nhận diện nội dung + thời gian (gần đúng trong 3 giây)
+      const approxTime = Math.floor(m.timestamp / 3000) * 3000;
+      const signature = `${m.conversationId}_${m.sender}_${m.textContent}_${m.mediaUrl || ""}_${approxTime}`;
+
+      if (mapById.has(m.msgId)) {
+        // Cập nhật bản ghi cũ
+        const old = mapById.get(m.msgId)!;
+        mapById.set(m.msgId, { ...old, ...m });
+      } else if (m.textContent && seenSignatures.has(signature)) {
+        // Trùng chữ ký nội dung, bỏ qua bản sao
+        continue;
+      } else {
+        seenSignatures.add(signature);
+        mapById.set(m.msgId, m);
+        deduped.push(m);
+      }
+    }
+
+    return Array.from(mapById.values()).sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  // Khử trùng lặp danh sách cuộc hội thoại theo tên (Deduplicate Conversations by Name)
+  private deduplicateConversations(list: StoredConversation[]): StoredConversation[] {
+    const nameMap = new Map<string, StoredConversation>();
+
+    for (const c of list) {
+      const normalizedName = c.name.trim().toLowerCase();
+      if (!normalizedName) continue;
+
+      if (nameMap.has(normalizedName)) {
+        const existing = nameMap.get(normalizedName)!;
+        // Giữ lại bản ghi có avatar tốt hơn hoặc timestamp mới hơn
+        if (c.lastTimestamp > existing.lastTimestamp) {
+          existing.lastTimestamp = c.lastTimestamp;
+          existing.lastMessage = c.lastMessage;
+        }
+        if (c.avatar && !c.avatar.includes("dicebear") && existing.avatar.includes("dicebear")) {
+          existing.avatar = c.avatar;
+        }
+        nameMap.set(normalizedName, existing);
+      } else {
+        nameMap.set(normalizedName, { ...c });
+      }
+    }
+
+    return Array.from(nameMap.values()).sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+  }
+
   private loadFromDisk() {
     try {
       if (fs.existsSync(MESSAGES_FILE)) {
         const raw = fs.readFileSync(MESSAGES_FILE, "utf-8");
-        this.messages = JSON.parse(raw);
-        // Tự động làm sạch các tin nhắn rác đã lưu trong quá khứ
-        for (const m of this.messages) {
+        const loaded: StoredMessage[] = JSON.parse(raw);
+        for (const m of loaded) {
           if (m.textContent) {
             const cleaned = cleanMessageContent(m.textContent);
             m.textContent = cleaned.cleanText;
             if (cleaned.reactions.length > 0 && (!m.reactions || m.reactions.length === 0)) {
               m.reactions = cleaned.reactions;
             }
+            if (cleaned.mentions.length > 0 && (!m.mentions || m.mentions.length === 0)) {
+              m.mentions = cleaned.mentions;
+            }
           }
         }
-        console.log(`[Storage] Loaded & Sanitized ${this.messages.length} messages from server volume.`);
+        this.messages = this.deduplicateMessages(loaded);
+        console.log(`[Storage] Loaded & Deduplicated ${this.messages.length} messages from server volume.`);
       }
     } catch (e) {
       console.warn("[Storage Warning] Could not parse messages.json:", e);
@@ -79,10 +140,11 @@ export class ServerStorageEngine {
       if (fs.existsSync(CONVERSATIONS_FILE)) {
         const raw = fs.readFileSync(CONVERSATIONS_FILE, "utf-8");
         const list: StoredConversation[] = JSON.parse(raw);
-        for (const c of list) {
+        const dedupedConvs = this.deduplicateConversations(list);
+        for (const c of dedupedConvs) {
           this.conversations.set(c.id, c);
         }
-        console.log(`[Storage] Loaded ${this.conversations.size} conversations from server volume.`);
+        console.log(`[Storage] Loaded & Deduplicated ${this.conversations.size} conversations from server volume.`);
       }
     } catch (e) {
       console.warn("[Storage Warning] Could not parse conversations.json:", e);
@@ -93,12 +155,13 @@ export class ServerStorageEngine {
     if (this.isSaving) return;
     this.isSaving = true;
     try {
+      this.messages = this.deduplicateMessages(this.messages);
       const tmpMsg = `${MESSAGES_FILE}.tmp`;
       fs.writeFileSync(tmpMsg, JSON.stringify(this.messages, null, 2), "utf-8");
       fs.renameSync(tmpMsg, MESSAGES_FILE);
 
+      const convList = this.deduplicateConversations(Array.from(this.conversations.values()));
       const tmpConv = `${CONVERSATIONS_FILE}.tmp`;
-      const convList = Array.from(this.conversations.values());
       fs.writeFileSync(tmpConv, JSON.stringify(convList, null, 2), "utf-8");
       fs.renameSync(tmpConv, CONVERSATIONS_FILE);
     } catch (e) {
@@ -138,24 +201,26 @@ export class ServerStorageEngine {
       });
 
       if (!res.ok) {
-        return remoteUrl;
+        return `/api/media/proxy?url=${encodeURIComponent(remoteUrl)}`;
       }
 
       const buffer = Buffer.from(await res.arrayBuffer());
       fs.writeFileSync(fullPath, buffer);
       return `/api/media/${filename}`;
     } catch (e) {
-      return remoteUrl;
+      return `/api/media/proxy?url=${encodeURIComponent(remoteUrl)}`;
     }
   }
 
   public async addMessage(msg: StoredMessage): Promise<StoredMessage> {
-    // Làm sạch nội dung văn bản và bóc tách reaction
     if (msg.textContent) {
       const cleaned = cleanMessageContent(msg.textContent);
       msg.textContent = cleaned.cleanText;
       if (cleaned.reactions.length > 0) {
         msg.reactions = cleaned.reactions;
+      }
+      if (cleaned.mentions.length > 0) {
+        msg.mentions = cleaned.mentions;
       }
     }
 
@@ -163,14 +228,22 @@ export class ServerStorageEngine {
       msg.mediaUrl = await this.downloadAndPersistMedia(msg.mediaUrl, msg.type);
     }
 
-    const existingIdx = this.messages.findIndex((m) => m.msgId === msg.msgId);
+    const approxTime = Math.floor(msg.timestamp / 3000) * 3000;
+    const existingIdx = this.messages.findIndex(
+      (m) =>
+        m.msgId === msg.msgId ||
+        (m.conversationId === msg.conversationId &&
+          m.sender === msg.sender &&
+          m.textContent === msg.textContent &&
+          Math.abs(m.timestamp - msg.timestamp) < 3000)
+    );
+
     if (existingIdx >= 0) {
       this.messages[existingIdx] = { ...this.messages[existingIdx], ...msg };
     } else {
       this.messages.push(msg);
     }
 
-    // Cập nhật cuộc hội thoại
     const conv = this.conversations.get(msg.conversationId);
     if (conv) {
       conv.lastMessage = msg.textContent || `[${msg.type}]`;
@@ -185,6 +258,7 @@ export class ServerStorageEngine {
   }
 
   public getMessages(conversationId?: string, limit: number = 500): StoredMessage[] {
+    this.messages = this.deduplicateMessages(this.messages);
     if (conversationId) {
       return this.messages
         .filter((m) => m.conversationId === conversationId)
@@ -196,9 +270,24 @@ export class ServerStorageEngine {
 
   public saveConversations(convs: StoredConversation[]) {
     for (const c of convs) {
-      const existing = this.conversations.get(c.id);
-      if (existing) {
-        this.conversations.set(c.id, { ...existing, ...c });
+      const normalizedName = c.name.trim().toLowerCase();
+      // Tìm theo id hoặc tên trùng
+      let existingKey: string | null = null;
+      for (const [id, item] of this.conversations.entries()) {
+        if (id === c.id || item.name.trim().toLowerCase() === normalizedName) {
+          existingKey = id;
+          break;
+        }
+      }
+
+      if (existingKey) {
+        const old = this.conversations.get(existingKey)!;
+        this.conversations.set(existingKey, {
+          ...old,
+          ...c,
+          id: existingKey,
+          avatar: (c.avatar && !c.avatar.includes("dicebear")) ? c.avatar : old.avatar,
+        });
       } else {
         this.conversations.set(c.id, c);
       }
@@ -207,7 +296,8 @@ export class ServerStorageEngine {
   }
 
   public getConversations(): StoredConversation[] {
-    return Array.from(this.conversations.values()).sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+    const list = Array.from(this.conversations.values());
+    return this.deduplicateConversations(list);
   }
 
   public getMediaFile(relativeFilename: string): { stream: Readable; mimeType: string; size: number } | null {

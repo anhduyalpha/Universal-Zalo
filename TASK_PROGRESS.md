@@ -2,30 +2,29 @@
 
 ## Milestone Status: COMPLETE & VERIFIED
 
-### 1. Parser & Message Content Sanitization
-- [x] **Zalo Legacy Code Stripper & Reaction Parser (`normalizer.ts`):**
-  - Robust regex/tokenizer isolating legacy tokens (`/-strong`, `/-heart`, `/-fade`, `:>:o:-((`, `:-bd`, `:-*`, etc.).
+### 1. Strict Data Deduplication & Idempotent Sync
+- [x] **Database & Ingestion Layer (`storage.ts` & `dexie_db.ts`):**
+  - Atomic deduplication of conversations by canonical name/id across server volume and client Dexie IndexedDB.
+  - Message stream deduplication using `msgId` and content signature windowing.
+  - Compound primary key indexing (`&msgId`, `id`) in Dexie schema v4.
+- [x] **Frontend State Management (`page.tsx`):**
+  - Deduplicated incoming state mutations via `deduplicateById` and `deduplicateConversationsByName`.
+  - Immutable unique `key={m.msgId}` and `key={conv.id}` for all React mapping loops.
+
+### 2. Message Sanitization & Reaction/Emoji Parser
+- [x] **Legacy Code Stripper & Reaction Lexer (`normalizer.ts`):**
+  - Global and trailing removal of legacy Zalo tokens (`/-strong`, `/-heart`, `/-fade`, `:>:o:-((`, `:-bd`, `:-*`, etc.).
+  - Transformation of inline emoticons (`:)`, `:(`, `:-D`, `:-P`, `:-*`, etc.) into modern Unicode emojis.
   - Structured extraction into `reactions: Array<{ code, type, emoji, count }>`.
-  - Comprehensive URL preservation mechanism protecting TikTok, YouTube, Web links.
-- [x] **Timestamp Normalizer:**
-  - 3-tier fallback parser mapping true epoch milliseconds (`data-time`, `data-ts`, `.card-time`, date headers) instead of batch `Date.now()`.
+  - Detection and extraction of `@mentions` into structured `mentions: Array<{ name, startIndex, endIndex }>`.
+  - Complete protection of URLs (TikTok, YouTube, Zalo, Web links).
 
-### 2. Overhaul "Đồng bộ" (Full Master Resync Pipeline)
-- [x] **Master Session Deep Inspection & State Dump Engine (`crawler.ts`):**
-  - Iterates over all sidebar conversations.
-  - Hydrates historical scroll buffers (`scrollTop = 0`).
-  - AST Pre-cleaning stripping nested `.react-container`, `.card-time`, `.quote-content`.
-  - Downloads media attachments into server volume `/app/data/media/`.
-- [x] **Full Resync API Endpoints:**
-  - `POST /api/sync/full-resync` and `POST /api/sync/full` exposed in Gateway Hub & Next.js proxy.
-- [x] **Atomic Client DB Reconciliation (`dexie_db.ts`):**
-  - Transactional `reconcileFullState` updating IndexedDB without data corruption.
-
-### 3. UI/UX Feedback & Seamless Transition to Live Chat
-- [x] **Sync Button & Progress Modal:**
-  - 4-stage visual progress bar with percent indicators ($0\% \rightarrow 100\%$).
-- [x] **Reaction Badges & Timestamps:**
-  - Structured reaction pills rendered under message bubbles (`[ 👍 1 ]`, `[ ❤️ 2 ]`).
-  - Accurate relative / absolute time display.
-- [x] **Live WebSocket Re-alignment:**
-  - Outgoing and incoming live messages processed through the identical sanitization pipeline.
+### 3. Media Attachments, Avatars & Asset Resiliency
+- [x] **Avatar Fallback Pipeline (`AvatarWithFallback` & `/api/media/proxy`):**
+  - Automatic letter-avatar SVG generation based on name hash for missing/expired avatar URLs.
+  - Backend image proxy route `/api/media/proxy?url=...` resolving CORS and hotlinking restrictions.
+- [x] **Rich Attachment Components:**
+  - `<FileAttachmentCard />` with formatted file sizes (KB/MB) and download links.
+  - `<AudioWaveformPlayer />` for voice notes.
+  - `<ImageGallery />` with click-to-zoom modal.
+  - `<MessageContentRenderer />` rendering styled `@mentions` and clickable links.

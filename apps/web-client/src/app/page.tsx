@@ -1,10 +1,211 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { db, Conversation, LocalMessage, seedInitialConversations } from "../lib/dexie_db";
+import {
+  db,
+  Conversation,
+  LocalMessage,
+  seedInitialConversations,
+  deduplicateById,
+  deduplicateConversationsByName,
+  MessageReaction,
+  MentionToken,
+} from "../lib/dexie_db";
 import { useLiveQuery } from "dexie-react-hooks";
 import { nanoid } from "nanoid";
 import Link from "next/link";
+
+// 1. Component Avatar chống lỗi 404 / CORS (Avatar Fallback Pipeline)
+function AvatarWithFallback({
+  name,
+  src,
+  size = 44,
+}: {
+  name: string;
+  src?: string;
+  size?: number;
+}) {
+  const [hasError, setHasError] = useState(false);
+  const cleanName = (name || "Zalo").trim();
+  const initial = cleanName.charAt(0).toUpperCase() || "Z";
+
+  // Bảng màu cho avatar chữ cái
+  const colors = [
+    "#0068ff", "#10b981", "#8b5cf6", "#f59e0b",
+    "#ec4899", "#3b82f6", "#06b6d4", "#6366f1",
+  ];
+  let hash = 0;
+  for (let i = 0; i < cleanName.length; i++) {
+    hash = cleanName.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const bgColor = colors[Math.abs(hash) % colors.length];
+
+  if (!src || hasError) {
+    return (
+      <div
+        style={{
+          width: size,
+          height: size,
+          borderRadius: "50%",
+          background: bgColor,
+          color: "#ffffff",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontWeight: 700,
+          fontSize: Math.round(size * 0.42),
+          flexShrink: 0,
+          boxShadow: "0 1px 4px rgba(0,0,0,0.12)",
+          userSelect: "none",
+        }}
+      >
+        {initial}
+      </div>
+    );
+  }
+
+  // Nếu là ảnh từ Zalo CDN, định tuyến qua proxy nếu cần
+  const finalSrc = src.startsWith("http") && !src.startsWith(window.location.origin)
+    ? `/api/media/proxy?url=${encodeURIComponent(src)}&name=${encodeURIComponent(cleanName)}`
+    : src;
+
+  return (
+    <img
+      src={finalSrc}
+      alt={cleanName}
+      onError={() => setHasError(true)}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        objectFit: "cover",
+        flexShrink: 0,
+        boxShadow: "0 1px 4px rgba(0,0,0,0.1)",
+      }}
+    />
+  );
+}
+
+// 2. Component Render Nội dung tin nhắn (hỗ trợ @mentions và link clickable)
+function MessageContentRenderer({
+  text,
+  mentions,
+  isMe,
+}: {
+  text: string;
+  mentions?: MentionToken[];
+  isMe: boolean;
+}) {
+  if (!text) return null;
+
+  // Regex nhận diện URL
+  const URL_REGEX = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
+  const parts = text.split(URL_REGEX);
+
+  return (
+    <div style={{ fontSize: 14, lineHeight: 1.5, wordBreak: "break-word" }}>
+      {parts.map((part, idx) => {
+        if (part.match(URL_REGEX)) {
+          const href = part.startsWith("http") ? part : `https://${part}`;
+          return (
+            <a
+              key={idx}
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                color: isMe ? "#ffffff" : "#0068ff",
+                textDecoration: "underline",
+                wordBreak: "break-all",
+              }}
+            >
+              {part}
+            </a>
+          );
+        }
+
+        // Kiểm tra format @mentions
+        const mentionMatch = part.match(/@[\p{L}\p{N}_\-\.\s]+/gu);
+        if (mentionMatch) {
+          return (
+            <span key={idx}>
+              {part.split(/(@[\p{L}\p{N}_\-\.\s]+)/gu).map((subPart, subIdx) => {
+                if (subPart.startsWith("@")) {
+                  return (
+                    <span
+                      key={subIdx}
+                      style={{
+                        color: isMe ? "#e0f2fe" : "#0284c7",
+                        fontWeight: 700,
+                        background: isMe ? "rgba(255,255,255,0.2)" : "rgba(2,132,199,0.1)",
+                        padding: "1px 5px",
+                        borderRadius: 4,
+                      }}
+                    >
+                      {subPart}
+                    </span>
+                  );
+                }
+                return subPart;
+              })}
+            </span>
+          );
+        }
+
+        return <span key={idx}>{part}</span>;
+      })}
+    </div>
+  );
+}
+
+// 3. Component Tệp đính kèm (File Attachment Card)
+function FileAttachmentCard({
+  name,
+  size,
+  url,
+  isMe,
+}: {
+  name?: string;
+  size?: number;
+  url?: string;
+  isMe: boolean;
+}) {
+  const formatSize = (bytes?: number) => {
+    if (!bytes) return "Tệp đính kèm";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1048576).toFixed(1)} MB`;
+  };
+
+  return (
+    <a
+      href={url || "#"}
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 14px",
+        background: isMe ? "rgba(255,255,255,0.15)" : "#f1f5f9",
+        borderRadius: 10,
+        textDecoration: "none",
+        color: isMe ? "#ffffff" : "#1e293b",
+        marginBottom: 6,
+        border: `1px solid ${isMe ? "rgba(255,255,255,0.3)" : "#e2e8f0"}`,
+      }}
+    >
+      <span style={{ fontSize: 24 }}>📄</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {name || "Tai_lieu_dinh_kem.pdf"}
+        </div>
+        <div style={{ fontSize: 11, opacity: 0.8 }}>{formatSize(size)}</div>
+      </div>
+      <span style={{ fontSize: 16 }}>⬇️</span>
+    </a>
+  );
+}
 
 export default function ZaloMultiDeviceApp() {
   const [activeConvId, setActiveConvId] = useState<string>("conv_1");
@@ -21,18 +222,21 @@ export default function ZaloMultiDeviceApp() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Lấy dữ liệu từ IndexedDB (Dexie)
-  const localConversations = useLiveQuery(() => db.conversations.toArray(), []) || [];
-  const activeMessages = useLiveQuery(
+  // Lấy dữ liệu từ IndexedDB (Dexie) và khử trùng lặp
+  const rawConversations = useLiveQuery(() => db.conversations.toArray(), []) || [];
+  const localConversations = deduplicateConversationsByName(rawConversations);
+
+  const rawMessages = useLiveQuery(
     () => db.messages.where("conversationId").equals(activeConvId).sortBy("timestamp"),
     [activeConvId]
   ) || [];
+  const activeMessages = deduplicateById(rawMessages);
 
   const currentActiveConv = localConversations.find((c) => c.id === activeConvId) || localConversations[0];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages]);
+  }, [activeMessages.length]);
 
   // Đồng bộ danh sách hội thoại từ Server Volume & Chromium
   const fetchLiveConversations = async () => {
@@ -54,7 +258,7 @@ export default function ZaloMultiDeviceApp() {
     }
   };
 
-  // Tải toàn bộ tin nhắn & Media đã lưu trên Server Volume cho cuộc hội thoại hiện tại
+  // Tải toàn bộ tin nhắn & Media đã lưu trên Server Volume
   const fetchServerMessages = async (convId: string, convName?: string, refresh: boolean = false) => {
     try {
       const targetName = convName || currentActiveConv?.name || "";
@@ -72,7 +276,10 @@ export default function ZaloMultiDeviceApp() {
               timestamp: msg.timestamp,
               type: msg.type || "TEXT",
               mediaUrl: msg.mediaUrl,
+              mediaName: msg.mediaName,
+              mediaSize: msg.mediaSize,
               reactions: msg.reactions,
+              mentions: msg.mentions,
             });
           }
         }
@@ -80,7 +287,6 @@ export default function ZaloMultiDeviceApp() {
     } catch (e) {}
   };
 
-  // Khi người dùng chọn cuộc hội thoại, tự động chuyển chat trên Chromium và cào tin nhắn
   const handleSelectConversation = (conv: Conversation) => {
     setActiveConvId(conv.id);
     fetchServerMessages(conv.id, conv.name);
@@ -130,7 +336,10 @@ export default function ZaloMultiDeviceApp() {
               timestamp: data.hlc?.physicalTime || Date.now(),
               type: data.type || "TEXT",
               mediaUrl: data.mediaUrl,
+              mediaName: data.mediaName,
+              mediaSize: data.mediaSize,
               reactions: data.reactions,
+              mentions: data.mentions,
             });
 
             await db.conversations.update(convId, {
@@ -224,8 +433,10 @@ export default function ZaloMultiDeviceApp() {
               sender: "ME",
               status: "DELIVERED",
               timestamp: Date.now(),
-              type: "IMAGE",
+              type: file.type.startsWith("image/") ? "IMAGE" : "FILE",
               mediaUrl: result.message.mediaUrl,
+              mediaName: file.name,
+              mediaSize: file.size,
             });
           }
         }
@@ -258,7 +469,6 @@ export default function ZaloMultiDeviceApp() {
       if (dumpResult && dumpResult.success) {
         setSyncProgress({ stage: "4/4: Đang đối soát và lập chỉ mục cơ sở dữ liệu IndexedDB...", percent: 95 });
 
-        // Đối soát và cập nhật cơ sở dữ liệu Dexie cục bộ
         if (dumpResult.conversations && dumpResult.messagesByConversation) {
           await db.reconcileFullState(dumpResult.conversations, dumpResult.messagesByConversation);
         }
@@ -324,7 +534,7 @@ export default function ZaloMultiDeviceApp() {
         </div>
       </div>
 
-      {/* 2. Cột Danh Sách Hội Thoại với Cuộn Mượt */}
+      {/* 2. Cột Danh Sách Hội Thoại Không Trùng Lặp */}
       <div style={{ width: 340, background: "#ffffff", borderRight: "1px solid #e5e7eb", display: "flex", flexDirection: "column", flexShrink: 0, height: "100%" }}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid #f1f5f9", flexShrink: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -389,14 +599,7 @@ export default function ZaloMultiDeviceApp() {
                     transition: "background 0.15s ease",
                   }}
                 >
-                  <img
-                    src={conv.avatar}
-                    alt={conv.name}
-                    style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).src = `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(conv.name)}`;
-                    }}
-                  />
+                  <AvatarWithFallback name={conv.name} src={conv.avatar} size={44} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
                       <span style={{ fontSize: 14, fontWeight: isSelected ? 700 : 600, color: "#1e293b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -423,16 +626,12 @@ export default function ZaloMultiDeviceApp() {
         <div style={{ height: 64, padding: "0 24px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff", flexShrink: 0 }}>
           {currentActiveConv ? (
             <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <img
-                src={currentActiveConv.avatar}
-                alt={currentActiveConv.name}
-                style={{ width: 42, height: 42, borderRadius: "50%", objectFit: "cover" }}
-              />
+              <AvatarWithFallback name={currentActiveConv.name} src={currentActiveConv.avatar} size={42} />
               <div>
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b" }}>{currentActiveConv.name}</div>
                 <div style={{ fontSize: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}>
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981" }}></span>
-                  Đang hoạt động (Đồng bộ sạch & Lưu vĩnh viễn)
+                  Đang hoạt động (Đồng bộ sạch & Khử trùng lặp)
                 </div>
               </div>
             </div>
@@ -456,7 +655,7 @@ export default function ZaloMultiDeviceApp() {
           </div>
         </div>
 
-        {/* Messages Stream View hỗ trợ hiển thị Media & Huy hiệu Reaction */}
+        {/* Messages Stream View khử trùng lặp & hỗ trợ Media */}
         <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14, background: "#f8fafc", minHeight: 0 }}>
           {activeMessages.length === 0 ? (
             <div style={{ margin: "auto", textAlign: "center", color: "#94a3b8" }}>
@@ -465,85 +664,106 @@ export default function ZaloMultiDeviceApp() {
               <div style={{ fontSize: 13, marginTop: 4 }}>Bấm <b>"⚡ Đồng bộ toàn bộ"</b> để tải và làm sạch toàn bộ tin nhắn!</div>
             </div>
           ) : (
-            activeMessages.map((m) => (
-              <div
-                key={m.msgId}
-                style={{
-                  alignSelf: m.sender === "ME" ? "flex-end" : "flex-start",
-                  maxWidth: "65%",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: m.sender === "ME" ? "flex-end" : "flex-start",
-                }}
-              >
+            activeMessages.map((m) => {
+              const isMe = m.sender === "ME";
+              return (
                 <div
+                  key={m.msgId}
                   style={{
-                    background: m.sender === "ME" ? "#0068ff" : "#ffffff",
-                    color: m.sender === "ME" ? "#ffffff" : "#1e293b",
-                    padding: "10px 16px",
-                    borderRadius: 16,
-                    borderBottomRightRadius: m.sender === "ME" ? 2 : 16,
-                    borderBottomLeftRadius: m.sender === "OTHER" ? 2 : 16,
-                    boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-                    position: "relative",
+                    alignSelf: isMe ? "flex-end" : "flex-start",
+                    maxWidth: "65%",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: isMe ? "flex-end" : "flex-start",
                   }}
                 >
-                  {/* Media Content (Ảnh / Video / Audio) */}
-                  {m.mediaUrl && m.type === "IMAGE" && (
-                    <img
-                      src={m.mediaUrl}
-                      alt="Media Attachment"
-                      onClick={() => setPreviewImage(m.mediaUrl || null)}
-                      style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
-                    />
-                  )}
-                  {m.mediaUrl && m.type === "VIDEO" && (
-                    <video
-                      controls
-                      src={m.mediaUrl}
-                      style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
-                    />
-                  )}
-                  {m.mediaUrl && m.type === "VOICE" && (
-                    <audio controls src={m.mediaUrl} style={{ width: "100%", marginBottom: 6 }} />
-                  )}
+                  <div
+                    style={{
+                      background: isMe ? "#0068ff" : "#ffffff",
+                      color: isMe ? "#ffffff" : "#1e293b",
+                      padding: "10px 16px",
+                      borderRadius: 16,
+                      borderBottomRightRadius: isMe ? 2 : 16,
+                      borderBottomLeftRadius: isMe ? 16 : 2,
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                      position: "relative",
+                    }}
+                  >
+                    {/* Media: Hình ảnh */}
+                    {m.mediaUrl && m.type === "IMAGE" && (
+                      <img
+                        src={m.mediaUrl}
+                        alt="Media Attachment"
+                        onClick={() => setPreviewImage(m.mediaUrl || null)}
+                        style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
+                      />
+                    )}
 
-                  {/* Clean Text Content (Đã bóc tách reaction rác) */}
-                  {m.textContent && (
-                    <div style={{ fontSize: 14, lineHeight: 1.5, wordBreak: "break-word" }}>{m.textContent}</div>
-                  )}
+                    {/* Media: Video */}
+                    {m.mediaUrl && m.type === "VIDEO" && (
+                      <video
+                        controls
+                        src={m.mediaUrl}
+                        style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
+                      />
+                    )}
 
-                  <div style={{ fontSize: 10, color: m.sender === "ME" ? "rgba(255,255,255,0.75)" : "#94a3b8", marginTop: 4, textAlign: "right" }}>
-                    {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {m.sender === "ME" && (m.status === "SENDING" ? "⏳" : "✓✓")}
+                    {/* Media: Audio / Tin nhắn thoại */}
+                    {m.mediaUrl && m.type === "VOICE" && (
+                      <audio controls src={m.mediaUrl} style={{ width: "100%", marginBottom: 6 }} />
+                    )}
+
+                    {/* Media: Tệp đính kèm (File Attachment) */}
+                    {m.mediaUrl && m.type === "FILE" && (
+                      <FileAttachmentCard
+                        name={m.mediaName}
+                        size={m.mediaSize}
+                        url={m.mediaUrl}
+                        isMe={isMe}
+                      />
+                    )}
+
+                    {/* Text Content Renderer với @mentions & URL clickable */}
+                    {m.textContent && (
+                      <MessageContentRenderer
+                        text={m.textContent}
+                        mentions={m.mentions}
+                        isMe={isMe}
+                      />
+                    )}
+
+                    <div style={{ fontSize: 10, color: isMe ? "rgba(255,255,255,0.75)" : "#94a3b8", marginTop: 4, textAlign: "right" }}>
+                      {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {isMe && (m.status === "SENDING" ? "⏳" : "✓✓")}
+                    </div>
                   </div>
+
+                  {/* Reaction Pills */}
+                  {m.reactions && m.reactions.length > 0 && (
+                    <div style={{ display: "flex", gap: 4, marginTop: -6, zIndex: 2, paddingLeft: isMe ? 0 : 8, paddingRight: isMe ? 8 : 0 }}>
+                      {m.reactions.map((r, rIdx) => (
+                        <span
+                          key={rIdx}
+                          style={{
+                            background: "#ffffff",
+                            border: "1px solid #e2e8f0",
+                            borderRadius: 12,
+                            padding: "2px 6px",
+                            fontSize: 11,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 3,
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+                          }}
+                        >
+                          <span>{r.emoji}</span>
+                          {r.count > 1 && <span style={{ fontWeight: 600, color: "#64748b" }}>{r.count}</span>}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-
-                {/* Huy hiệu Reaction có cấu trúc (Structured Reaction Badges) */}
-                {m.reactions && m.reactions.length > 0 && (
-                  <div style={{ display: "flex", gap: 4, marginTop: -6, zIndex: 2, paddingLeft: m.sender === "ME" ? 0 : 8, paddingRight: m.sender === "ME" ? 8 : 0 }}>
-                    {m.reactions.map((r, rIdx) => (
-                      <span
-                        key={rIdx}
-                        style={{
-                          background: "#ffffff",
-                          border: "1px solid #e2e8f0",
-                          borderRadius: 12,
-                          padding: "2px 6px",
-                          fontSize: 11,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 3,
-                          boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-                        }}
-                      >
-                        <span>{r.emoji}</span>
-                        {r.count > 1 && <span style={{ fontWeight: 600, color: "#64748b" }}>{r.count}</span>}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))
+              );
+            })
           )}
           <div ref={messagesEndRef} />
         </div>
@@ -558,7 +778,7 @@ export default function ZaloMultiDeviceApp() {
           </div>
         )}
 
-        {/* Input Composer có hỗ trợ Tải file & Gửi ảnh */}
+        {/* Input Composer */}
         <form onSubmit={handleSendMessage} style={{ padding: "14px 20px", borderTop: "1px solid #e5e7eb", background: "#ffffff", display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
           <input
             type="file"

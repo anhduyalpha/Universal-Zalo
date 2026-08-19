@@ -11,6 +11,12 @@ export interface MessageReaction {
   count: number;
 }
 
+export interface MentionToken {
+  name: string;
+  startIndex: number;
+  endIndex: number;
+}
+
 export interface LocalMessage {
   id?: number;
   msgId: string;
@@ -32,6 +38,7 @@ export interface LocalMessage {
   replyToMsgId?: string;
   replyToText?: string;
   reactions?: MessageReaction[];
+  mentions?: MentionToken[];
 }
 
 export interface Conversation {
@@ -46,14 +53,47 @@ export interface Conversation {
   isOnline?: boolean;
 }
 
+export function deduplicateById<T extends { id?: string | number; msgId?: string }>(items: T[]): T[] {
+  const map = new Map<string, T>();
+  for (const item of items) {
+    const key = String(item.msgId || item.id || "");
+    if (key) {
+      map.set(key, item);
+    }
+  }
+  return Array.from(map.values());
+}
+
+export function deduplicateConversationsByName(convs: Conversation[]): Conversation[] {
+  const map = new Map<string, Conversation>();
+  for (const c of convs) {
+    const norm = c.name.trim().toLowerCase();
+    if (!norm) continue;
+    if (map.has(norm)) {
+      const existing = map.get(norm)!;
+      if (c.lastTimestamp > existing.lastTimestamp) {
+        existing.lastTimestamp = c.lastTimestamp;
+        existing.lastMessage = c.lastMessage;
+      }
+      if (c.avatar && !c.avatar.includes("dicebear") && existing.avatar.includes("dicebear")) {
+        existing.avatar = c.avatar;
+      }
+      map.set(norm, existing);
+    } else {
+      map.set(norm, { ...c });
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+}
+
 export class ZaloLocalDatabase extends Dexie {
   messages!: Table<LocalMessage, number>;
   conversations!: Table<Conversation, string>;
 
   constructor() {
     super("UniversalZaloDB");
-    this.version(3).stores({
-      messages: "++id, msgId, conversationId, sender, status, timestamp, type",
+    this.version(4).stores({
+      messages: "++id, &msgId, conversationId, sender, status, timestamp, type",
       conversations: "id, name, type, lastTimestamp, unreadCount, isPinned",
     });
   }
@@ -66,8 +106,10 @@ export class ZaloLocalDatabase extends Dexie {
     newMessagesMap: Record<string, LocalMessage[]>
   ) {
     return this.transaction("rw", [this.conversations, this.messages], async () => {
-      // 1. Cập nhật hoặc thêm mới các cuộc hội thoại
-      for (const conv of newConversations) {
+      const dedupedConvs = deduplicateConversationsByName(newConversations);
+
+      // 1. Cập nhật các cuộc hội thoại không trùng lặp
+      for (const conv of dedupedConvs) {
         await this.conversations.put(conv);
       }
 
