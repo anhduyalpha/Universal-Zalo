@@ -1,371 +1,199 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { db, seedInitialConversations, LocalMessage, Conversation, MessageType } from "../lib/dexie_db";
+import { db, LocalMessage } from "../lib/dexie_db";
 import { useLiveQuery } from "dexie-react-hooks";
 import { nanoid } from "nanoid";
-import { ConversationSidebar } from "../components/ConversationSidebar";
-import { ChatHeader } from "../components/ChatHeader";
-import { ChatInput } from "../components/ChatInput";
-import { MessageItem } from "../components/MessageItem";
-import { MediaViewer } from "../components/MediaViewer";
-import { SettingsModal } from "../components/SettingsModal";
-import { soundFX } from "../lib/sound_effects";
-import { registerServiceWorker, showLocalNotification } from "../lib/push_manager";
-import { MessageSquare, ArrowLeft, WifiOff, AlertTriangle } from "lucide-react";
 
-export default function UniversalZaloPWA() {
-  const [activeConvId, setActiveConvId] = useState<string>("general");
+export default function ChatDashboard() {
+  const [inputText, setInputText] = useState("");
   const [wsStatus, setWsStatus] = useState<"CONNECTED" | "DISCONNECTED" | "CONNECTING">("CONNECTING");
-  const [showMobileSidebar, setShowMobileSidebar] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [activeMedia, setActiveMedia] = useState<{ type: "IMAGE" | "VIDEO"; src: string; name?: string } | null>(null);
-
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [qrTimestamp, setQrTimestamp] = useState(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Live queries from Dexie.js (Offline First)
-  const conversations = useLiveQuery(() => db.conversations.orderBy("lastTimestamp").reverse().toArray(), []) || [];
-  const activeConversation = conversations.find((c) => c.id === activeConvId);
+  const messages = useLiveQuery(() => db.messages.orderBy("timestamp").toArray(), []) || [];
 
-  const messages = useLiveQuery(
-    () => db.messages.where("conversationId").equals(activeConvId).sortBy("timestamp"),
-    [activeConvId]
-  ) || [];
+  // Tự động phát hiện Host để kết nối WebSocket và lấy QR
+  const [hubHost, setHubHost] = useState("127.0.0.1");
 
-  // Handle Mobile Resize
   useEffect(() => {
-    const handleResize = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-    handleResize();
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+    if (typeof window !== "undefined") {
+      const hostname = window.location.hostname || "127.0.0.1";
+      setHubHost(hostname);
 
-  // Initialize DB & Service Worker
-  useEffect(() => {
-    seedInitialConversations();
-    registerServiceWorker();
-  }, []);
-
-  // Scroll to bottom on new messages
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  // Mark unread messages as read when opening conversation
-  useEffect(() => {
-    if (activeConvId) {
-      db.conversations.update(activeConvId, { unreadCount: 0 });
-    }
-  }, [activeConvId]);
-
-  // WebSocket Connection with Auto-reconnect
-  useEffect(() => {
-    let isSubscribed = true;
-
-    const connectWS = () => {
-      if (!isSubscribed) return;
-
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.hostname || "127.0.0.1";
-      const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `${protocol}//${host}:8080`;
-
-      setWsStatus("CONNECTING");
+      const wsUrl = `ws://${hostname}:8080`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
-      ws.onopen = () => {
-        if (!isSubscribed) return;
-        setWsStatus("CONNECTED");
-      };
-
-      ws.onclose = () => {
-        if (!isSubscribed) return;
-        setWsStatus("DISCONNECTED");
-        // Reconnect after 3 seconds
-        reconnectTimeoutRef.current = setTimeout(connectWS, 3000);
-      };
-
-      ws.onerror = () => {
-        ws.close();
-      };
+      ws.onopen = () => setWsStatus("CONNECTED");
+      ws.onclose = () => setWsStatus("DISCONNECTED");
 
       ws.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.event === "MESSAGE_FANOUT") {
-            const targetConvId = data.conversationId || "general";
-            const now = data.hlc?.physicalTime || Date.now();
-
-            // 1. Add to local messages
             await db.messages.add({
               msgId: data.msgId,
-              conversationId: targetConvId,
-              textContent: data.textContent || "",
+              conversationId: data.conversationId || "general",
+              textContent: data.textContent,
               sender: "OTHER",
-              senderName: data.senderName || "Người gửi Zalo",
               status: "DELIVERED",
-              timestamp: now,
-              type: data.type || "TEXT",
-              mediaUrl: data.mediaUrl,
-              mediaName: data.mediaName,
-              mediaSize: data.mediaSize,
-              mediaDuration: data.mediaDuration,
-              stickerUrl: data.stickerUrl,
+              timestamp: data.hlc?.physicalTime || Date.now(),
             });
-
-            // 2. Update conversation snippet
-            const snippet = data.type === "STICKER" ? "[Sticker]" : data.type === "IMAGE" ? "[Hình ảnh]" : data.type === "VOICE" ? "[Tin nhắn thoại]" : data.type === "FILE" ? `[Tệp] ${data.mediaName || ""}` : (data.textContent || "Tin nhắn mới");
-
-            const conv = await db.conversations.get(targetConvId);
-            if (conv) {
-              await db.conversations.update(targetConvId, {
-                lastMessage: snippet,
-                lastTimestamp: now,
-                unreadCount: activeConvId === targetConvId ? 0 : (conv.unreadCount || 0) + 1,
-              });
-            } else {
-              await db.conversations.add({
-                id: targetConvId,
-                name: data.senderName || `Người dùng ${targetConvId.slice(0, 6)}`,
-                avatar: `https://api.dicebear.com/7.x/adventurer/svg?seed=${targetConvId}`,
-                type: "DIRECT",
-                lastMessage: snippet,
-                lastTimestamp: now,
-                unreadCount: activeConvId === targetConvId ? 0 : 1,
-                isOnline: true,
-              });
-            }
-
-            // 3. Audio & Notification Feedback
-            soundFX.playReceive();
-            showLocalNotification(data.senderName || "Universal Zalo", snippet, undefined, targetConvId);
           }
         } catch (e) {
           console.error("Failed to parse websocket frame:", e);
         }
       };
-    };
 
-    connectWS();
+      return () => {
+        ws.close();
+      };
+    }
+  }, []);
 
-    return () => {
-      isSubscribed = false;
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (wsRef.current) wsRef.current.close();
-    };
-  }, [activeConvId]);
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputText.trim()) return;
 
-  // Handle Send Message
-  const handleSendMessage = async (payload: {
-    type: MessageType;
-    textContent?: string;
-    mediaUrl?: string;
-    mediaName?: string;
-    mediaSize?: number;
-    mediaDuration?: number;
-    stickerUrl?: string;
-  }) => {
     const tempMsgId = nanoid();
     const now = Date.now();
 
-    // 1. Optimistic insert to Dexie IndexedDB
+    // 1. Lưu ngay vào IndexedDB nội bộ với trạng thái SENDING
     await db.messages.add({
       msgId: tempMsgId,
-      conversationId: activeConvId,
-      textContent: payload.textContent || "",
+      conversationId: "general",
+      textContent: inputText,
       sender: "ME",
       status: "SENDING",
       timestamp: now,
-      type: payload.type,
-      mediaUrl: payload.mediaUrl,
-      mediaName: payload.mediaName,
-      mediaSize: payload.mediaSize,
-      mediaDuration: payload.mediaDuration,
-      stickerUrl: payload.stickerUrl,
     });
 
-    // 2. Update conversation preview
-    const snippet = payload.type === "STICKER" ? "[Sticker]" : payload.type === "IMAGE" ? "[Hình ảnh]" : payload.type === "VOICE" ? "[Tin nhắn thoại]" : payload.type === "FILE" ? `[Tệp] ${payload.mediaName || ""}` : (payload.textContent || "");
-
-    await db.conversations.update(activeConvId, {
-      lastMessage: `Bạn: ${snippet}`,
-      lastTimestamp: now,
-    });
-
-    // 3. Play pop sound
-    soundFX.playSend();
-
-    // 4. Send through WebSocket to Gateway Hub
+    // 2. Gửi qua WebSocket
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: "SEND_MESSAGE",
-          conversationId: activeConvId,
-          textContent: payload.textContent,
-          messageType: payload.type,
-          mediaUrl: payload.mediaUrl,
-          mediaName: payload.mediaName,
-          mediaSize: payload.mediaSize,
-          mediaDuration: payload.mediaDuration,
-          stickerUrl: payload.stickerUrl,
+          conversationId: "general",
+          textContent: inputText,
           idempotencyKey: tempMsgId,
         })
       );
     }
+
+    setInputText("");
   };
 
   return (
-    <div
-      style={{
-        display: "flex",
-        height: "100dvh",
-        width: "100vw",
-        backgroundColor: "#f0f2f5",
-        overflow: "hidden",
-        position: "relative",
-      }}
-    >
-      {/* Lightbox Media Viewer */}
-      {activeMedia && (
-        <MediaViewer
-          type={activeMedia.type}
-          src={activeMedia.src}
-          name={activeMedia.name}
-          onClose={() => setActiveMedia(null)}
-        />
-      )}
-
-      {/* Settings Modal */}
-      {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} wsStatus={wsStatus} />
-      )}
-
-      {/* Conversation Sidebar (Desktop & Mobile Drawer) */}
-      <ConversationSidebar
-        conversations={conversations}
-        activeId={activeConvId}
-        onSelect={(id) => {
-          setActiveConvId(id);
-          setShowMobileSidebar(false);
-        }}
-        onToggleSettings={() => setShowSettings(true)}
-        isMobile={isMobile}
-        isOpen={!isMobile || showMobileSidebar}
-        onCloseMobile={() => setShowMobileSidebar(false)}
-      />
-
-      {/* Main Chat Area */}
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          height: "100%",
-          backgroundColor: "#f8fafc",
-          position: "relative",
-          minWidth: 0,
-        }}
-      >
-        {/* Offline / Reconnecting Banner */}
-        {wsStatus !== "CONNECTED" && (
-          <div
-            style={{
-              padding: "6px 16px",
-              backgroundColor: wsStatus === "CONNECTING" ? "#fef3c7" : "#fee2e2",
-              color: wsStatus === "CONNECTING" ? "#92400e" : "#991b1b",
-              fontSize: 12,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 8,
-              fontWeight: 500,
-              zIndex: 20,
+    <div style={{ maxWidth: 850, margin: "20px auto", background: "#fff", borderRadius: 12, boxShadow: "0 4px 16px rgba(0,0,0,0.1)", overflow: "hidden", display: "flex", flexDirection: "column", height: "90vh", position: "relative" }}>
+      {/* Header */}
+      <div style={{ padding: "14px 20px", borderBottom: "1px solid #e5e7eb", background: "#0068ff", color: "#fff", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>Universal Zalo Multi-Device Web Client</h2>
+          <small style={{ opacity: 0.85 }}>Sub-Client PWA Session</small>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={() => {
+              setQrTimestamp(Date.now());
+              setShowQrModal(true);
             }}
+            style={{ padding: "6px 14px", background: "#ffffff", color: "#0068ff", border: "none", borderRadius: 18, fontWeight: 600, fontSize: 13, cursor: "pointer", boxShadow: "0 2px 4px rgba(0,0,0,0.1)" }}
           >
-            {wsStatus === "CONNECTING" ? (
-              <>
-                <AlertTriangle size={14} /> Đang kết nối lại với Gateway Hub...
-              </>
-            ) : (
-              <>
-                <WifiOff size={14} /> Mất kết nối Gateway Hub. Tin nhắn sẽ tự động gửi khi online trở lại.
-              </>
-            )}
+            📲 Quét mã QR Zalo
+          </button>
+          <span style={{ fontSize: 12, padding: "4px 10px", borderRadius: 12, background: wsStatus === "CONNECTED" ? "#10b981" : "#ef4444", fontWeight: 500 }}>
+            {wsStatus}
+          </span>
+        </div>
+      </div>
+
+      {/* QR Modal */}
+      {showQrModal && (
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, backdropFilter: "blur(4px)" }}>
+          <div style={{ background: "#fff", padding: 24, borderRadius: 16, width: 440, maxWidth: "90%", textAlign: "center", boxShadow: "0 10px 25px rgba(0,0,0,0.2)" }}>
+            <h3 style={{ margin: "0 0 10px 0", color: "#1f2937", fontSize: 18 }}>Quét mã QR để Đăng nhập Zalo</h3>
+            <p style={{ margin: "0 0 16px 0", fontSize: 13, color: "#6b7280" }}>
+              Mở ứng dụng Zalo trên điện thoại $\rightarrow$ Chọn biểu tượng Quét mã QR trên đầu màn hình.
+            </p>
+
+            <div style={{ minHeight: 280, display: "flex", alignItems: "center", justifyContent: "center", background: "#f9fafb", borderRadius: 12, overflow: "hidden", border: "1px solid #e5e7eb" }}>
+              <img
+                src={`http://${hubHost}:8080/qr?t=${qrTimestamp}`}
+                alt="Zalo QR Code Live"
+                style={{ width: "100%", height: "auto", display: "block" }}
+                onError={(e) => {
+                  (e.target as HTMLElement).style.display = "none";
+                }}
+              />
+            </div>
+
+            <div style={{ marginTop: 18, display: "flex", gap: 10, justifyContent: "center" }}>
+              <button
+                onClick={() => setQrTimestamp(Date.now())}
+                style={{ padding: "8px 18px", background: "#f3f4f6", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer" }}
+              >
+                🔄 Làm mới ảnh
+              </button>
+              <button
+                onClick={() => setShowQrModal(false)}
+                style={{ padding: "8px 22px", background: "#0068ff", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+              >
+                Đã đăng nhập xong
+              </button>
+            </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Chat Header */}
-        <ChatHeader
-          conversation={activeConversation}
-          wsStatus={wsStatus}
-          onToggleSidebar={() => setShowMobileSidebar(!showMobileSidebar)}
-          onOpenInfo={() => setShowSettings(true)}
-          isMobile={isMobile}
-        />
-
-        {/* Messages Scroll Area */}
-        <div
-          style={{
-            flex: 1,
-            padding: "16px 20px",
-            overflowY: "auto",
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          {messages.length === 0 ? (
+      {/* Messages View */}
+      <div style={{ flex: 1, padding: 20, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc" }}>
+        {messages.length === 0 ? (
+          <div style={{ textAlign: "center", color: "#9ca3af", marginTop: 60, fontSize: 14 }}>
+            Chưa có tin nhắn. Hãy bấm <b>"📲 Quét mã QR Zalo"</b> ở góc trên để liên kết tài khoản!
+          </div>
+        ) : (
+          messages.map((m) => (
             <div
+              key={m.msgId}
               style={{
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#94a3b8",
-                gap: 12,
+                alignSelf: m.sender === "ME" ? "flex-end" : "flex-start",
+                maxWidth: "70%",
+                background: m.sender === "ME" ? "#0068ff" : "#ffffff",
+                color: m.sender === "ME" ? "#ffffff" : "#1f2937",
+                padding: "10px 14px",
+                borderRadius: 14,
+                borderBottomRightRadius: m.sender === "ME" ? 2 : 14,
+                borderBottomLeftRadius: m.sender === "OTHER" ? 2 : 14,
+                boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
               }}
             >
-              <div
-                style={{
-                  width: 64,
-                  height: 64,
-                  borderRadius: "50%",
-                  backgroundColor: "#e0f2fe",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "#0068ff",
-                }}
-              >
-                <MessageSquare size={32} />
-              </div>
-              <div style={{ fontWeight: 600, fontSize: 15, color: "#475569" }}>
-                Chưa có tin nhắn trong cuộc trò chuyện này
-              </div>
-              <div style={{ fontSize: 13, maxWidth: 300, textAlign: "center" }}>
-                Hãy gửi tin nhắn, hình ảnh hoặc sticker đầu tiên để bắt đầu!
+              <div style={{ fontSize: 14 }}>{m.textContent}</div>
+              <div style={{ fontSize: 10, color: m.sender === "ME" ? "rgba(255,255,255,0.75)" : "#9ca3af", marginTop: 4, textAlign: "right" }}>
+                {new Date(m.timestamp).toLocaleTimeString()} {m.sender === "ME" && (m.status === "SENDING" ? "⏳" : "✓✓")}
               </div>
             </div>
-          ) : (
-            messages.map((m) => (
-              <MessageItem
-                key={m.msgId || m.id}
-                message={m}
-                onOpenMedia={(type, src, name) => setActiveMedia({ type, src, name })}
-              />
-            ))
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input Bar */}
-        <ChatInput onSendMessage={handleSendMessage} disabled={false} />
+          ))
+        )}
       </div>
+
+      {/* Input Form */}
+      <form onSubmit={handleSendMessage} style={{ padding: "14px 18px", borderTop: "1px solid #e5e7eb", background: "#ffffff", display: "flex", gap: 10 }}>
+        <input
+          type="text"
+          value={inputText}
+          onChange={(e) => setInputText(e.target.value)}
+          placeholder="Nhập tin nhắn Zalo..."
+          style={{ flex: 1, padding: "12px 18px", borderRadius: 24, border: "1px solid #d1d5db", outline: "none", fontSize: 14 }}
+        />
+        <button
+          type="submit"
+          style={{ padding: "0 24px", background: "#0068ff", color: "#fff", border: "none", borderRadius: 24, fontWeight: "bold", fontSize: 14, cursor: "pointer" }}
+        >
+          Gửi
+        </button>
+      </form>
     </div>
   );
 }
