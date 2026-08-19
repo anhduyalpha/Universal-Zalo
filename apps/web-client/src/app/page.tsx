@@ -65,7 +65,7 @@ function AvatarWithFallback({
   }
 
   // Nếu là ảnh từ Zalo CDN, định tuyến qua proxy nếu cần
-  const finalSrc = src.startsWith("http") && !src.startsWith(window.location.origin)
+  const finalSrc = src.startsWith("http") && typeof window !== "undefined" && !src.startsWith(window.location.origin)
     ? `/api/media/proxy?url=${encodeURIComponent(src)}&name=${encodeURIComponent(cleanName)}`
     : src;
 
@@ -124,12 +124,12 @@ function MessageContentRenderer({
           );
         }
 
-        // Kiểm tra format @mentions
-        const mentionMatch = part.match(/@[\p{L}\p{N}_\-\.\s]+/gu);
+        // Kiểm tra format @mentions tương thích mọi chuẩn Unicode & ES
+        const mentionMatch = part.match(/@[a-zA-Z0-9_\-\.\s\u00C0-\u024F\u1E00-\u1EFF]+/g);
         if (mentionMatch) {
           return (
             <span key={idx}>
-              {part.split(/(@[\p{L}\p{N}_\-\.\s]+)/gu).map((subPart, subIdx) => {
+              {part.split(/(@[a-zA-Z0-9_\-\.\s\u00C0-\u024F\u1E00-\u1EFF]+)/g).map((subPart, subIdx) => {
                 if (subPart.startsWith("@")) {
                   return (
                     <span
