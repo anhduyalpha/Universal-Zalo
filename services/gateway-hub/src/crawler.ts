@@ -11,28 +11,39 @@ export interface MasterDumpResult {
 }
 
 /**
- * Trích xuất toàn bộ danh sách hội thoại từ Sidebar của Zalo Web
+ * Trích xuất chuẩn xác toàn bộ danh sách hội thoại từ Sidebar của Zalo Web
  */
 export async function extractSidebarConversations(sendCdpCommand: (method: string, params?: any) => Promise<any>): Promise<StoredConversation[]> {
   const script = `
     (() => {
       const items = [];
       const convElements = document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item, div[id^="conv-item-"]');
+      
       convElements.forEach((el, idx) => {
-        const nameEl = el.querySelector('.conv-item-title__name, .name, [class*="name"], [class*="title"], span[title]');
+        // Chỉ lấy tiêu đề trong phần header của item, loại trừ người gửi trong .conv-message
+        const titleContainer = el.querySelector('.conv-item-title, [class*="conv-item-title"], .conv-item-header, .title-wrap');
+        const nameEl = titleContainer 
+          ? titleContainer.querySelector('.conv-item-title__name, .title, span[title], div[title], [class*="title"]') || titleContainer
+          : el.querySelector('.conv-item-title__name, .conv-item-title, span[title]');
+        
         const msgEl = el.querySelector('.conv-message, .msg, [class*="message"], [class*="last-msg"], [class*="truncate"]');
         const timeEl = el.querySelector('.time, [class*="time"]');
         const imgEl = el.querySelector('img');
         const unreadEl = el.querySelector('.unread-badge, [class*="unread"], .badge');
         
-        const name = nameEl ? nameEl.textContent.trim() : (el.getAttribute('title') || "");
-        if (name && name !== "Tìm kiếm" && !items.some(i => i.name === name)) {
+        let rawName = nameEl ? (nameEl.getAttribute('title') || nameEl.textContent || "") : (el.getAttribute('title') || "");
+        // Chuẩn hóa ký tự khoảng trắng không ngắt \u00A0 thành khoảng trắng thông thường
+        const name = rawName.replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').replace(/:$/, '').trim();
+        
+        if (name && name !== "Tìm kiếm" && name !== "Bạn" && !items.some(i => i.name === name)) {
           const unreadCount = unreadEl ? (parseInt(unreadEl.textContent.trim(), 10) || 0) : 0;
+          const isGroup = name.includes("Nhóm") || name.includes("CNTT") || name.includes("Thủ Thuật") || name.includes("GAME") || name.includes("UIT") || name.includes("AI") || name.includes("TUT");
+          
           items.push({
             id: 'conv_' + (idx + 1),
             name: name,
             avatar: imgEl ? imgEl.src : ('https://api.dicebear.com/7.x/bottts/svg?seed=' + encodeURIComponent(name)),
-            type: (name.includes("Nhóm") || name.includes("CNTT") || name.includes("Thủ Thuật") || name.includes("GAME") || name.includes("UIT")) ? "GROUP" : "DIRECT",
+            type: isGroup ? "GROUP" : "DIRECT",
             lastMessage: msgEl ? msgEl.textContent.trim() : "Chưa có tin nhắn mới",
             lastTimestamp: Date.now() - (idx * 180000),
             unreadCount: unreadCount,
@@ -57,7 +68,7 @@ export async function extractSidebarConversations(sendCdpCommand: (method: strin
 }
 
 /**
- * Mở một cuộc hội thoại, kích hoạt cuộn ngược lên trên để nạp bộ đệm lịch sử và cào toàn bộ tin nhắn sạch
+ * Mở cuộc hội thoại bằng click chuẩn xác và cào toàn bộ lịch sử tin nhắn
  */
 export async function scrapeConversationWithHistory(
   sendCdpCommand: (method: string, params?: any) => Promise<any>,
@@ -65,27 +76,35 @@ export async function scrapeConversationWithHistory(
   convName: string,
   maxScrollUpPasses: number = 2
 ): Promise<StoredMessage[]> {
-  const escapedName = JSON.stringify(convName);
+  const cleanTargetName = convName.replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+  const escapedName = JSON.stringify(cleanTargetName);
 
   const script = `
     (async () => {
-      const targetName = ${escapedName};
+      const targetName = ${escapedName}.toLowerCase();
       
-      // 1. Tìm và click chọn cuộc hội thoại trong sidebar
+      // 1. Tìm và click chọn cuộc hội thoại trong sidebar (Chuẩn hóa \\u00A0)
       const convElements = Array.from(document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item'));
       const targetEl = convElements.find(el => {
-        const nameEl = el.querySelector('.conv-item-title__name, .name, [class*="name"], [class*="title"], span[title]');
-        const name = nameEl ? nameEl.textContent.trim() : (el.getAttribute('title') || "");
-        return name && name.toLowerCase().includes(targetName.toLowerCase());
+        const titleContainer = el.querySelector('.conv-item-title, [class*="conv-item-title"], .conv-item-header, .title-wrap');
+        const nameEl = titleContainer 
+          ? titleContainer.querySelector('.conv-item-title__name, .title, span[title], div[title]') || titleContainer
+          : el.querySelector('.conv-item-title__name, .conv-item-title, span[title]');
+        
+        const rawName = nameEl ? (nameEl.getAttribute('title') || nameEl.textContent || "") : (el.getAttribute('title') || "");
+        const normName = rawName.replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+        
+        return normName && (normName === targetName || normName.includes(targetName) || targetName.includes(normName));
       });
 
       if (targetEl) {
         targetEl.click();
-        await new Promise(r => setTimeout(r, 450));
+        targetEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 600));
       }
 
       // 2. Kích hoạt cuộn ngược lên trên để nạp thêm tin nhắn lịch sử (Scroll Buffer Hydration)
-      const scrollContainers = document.querySelectorAll('#chat-body, .message-view-scroll, .chat-history, [class*="message-view__scroll"]');
+      const scrollContainers = document.querySelectorAll('#chat-body, .message-view-scroll, .chat-history, [class*="message-view__scroll"], [class*="chat-message-list"]');
       for (const container of scrollContainers) {
         for (let pass = 0; pass < ${maxScrollUpPasses}; pass++) {
           if (container && container.scrollTop > 0) {
@@ -97,12 +116,11 @@ export async function scrapeConversationWithHistory(
 
       // 3. Phân giải DOM cây tin nhắn với AST Pre-cleaning
       const rawMessages = [];
-      const msgNodes = Array.from(document.querySelectorAll('.chat-message, [class*="chat-message"], .msg-item, [id^="msg-"], .message-view'));
+      const msgNodes = Array.from(document.querySelectorAll('.chat-message, [class*="chat-message"], .msg-item, [id^="msg-"], .message-view, [data-id^="msg_"]'));
       
       let currentDateHeader = "";
 
       msgNodes.forEach((el, idx) => {
-        // Kiểm tra tiêu đề ngày phân cách (ví dụ: "18/08/2026", "Hôm nay", "Hôm qua")
         const dateHeaderEl = el.querySelector('.chat-date, [class*="chat-date"], .day-divider');
         if (dateHeaderEl) {
           currentDateHeader = dateHeaderEl.textContent.trim();
@@ -110,7 +128,6 @@ export async function scrapeConversationWithHistory(
 
         const clone = el.cloneNode(true);
 
-        // Bóc tách và loại bỏ các phần tử con không thuộc nội dung tin nhắn (Reactions, Thẻ thời gian, Quotes)
         const pruneSelectors = [
           '.react-container', '.react-list', '.react-total', '.reaction-list',
           '.card-time', '.time', '.quote-content', '.reply-container',
@@ -147,7 +164,7 @@ export async function scrapeConversationWithHistory(
 
         if (text || mediaUrl) {
           rawMessages.push({
-            msgId: el.getAttribute('id') || ('msg_' + convId + '_' + idx),
+            msgId: el.getAttribute('id') || el.getAttribute('data-id') || ('msg_' + convId + '_' + idx),
             rawText: text,
             sender: isMe ? "ME" : "OTHER",
             mediaUrl: mediaUrl,
@@ -192,6 +209,7 @@ export async function scrapeConversationWithHistory(
         type: item.type,
         mediaUrl: item.mediaUrl,
         reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
+        mentions: cleaned.mentions.length > 0 ? cleaned.mentions : undefined,
       });
 
       savedMessages.push(stored);
@@ -210,7 +228,7 @@ export async function scrapeConversationWithHistory(
 export async function executeFullMasterResync(sendCdpCommand: (method: string, params?: any) => Promise<any>): Promise<MasterDumpResult> {
   console.log("🚀 [Full Resync] Starting Full Master Session Data Dump...");
   
-  // 1. Lấy toàn bộ danh sách hội thoại
+  // 1. Lấy chuẩn xác danh sách hội thoại
   const conversations = await extractSidebarConversations(sendCdpCommand);
   if (conversations.length > 0) {
     serverStorage.saveConversations(conversations);
@@ -220,8 +238,8 @@ export async function executeFullMasterResync(sendCdpCommand: (method: string, p
   const messagesByConv: Record<string, StoredMessage[]> = {};
   let totalMessagesCount = 0;
 
-  // 2. Cào tin nhắn sâu cho tối đa 12 cuộc hội thoại hàng đầu
-  const targetConvs = allConvs.slice(0, 12);
+  // 2. Cào tin nhắn sâu cho các cuộc hội thoại
+  const targetConvs = allConvs.slice(0, 15);
   for (const conv of targetConvs) {
     const msgs = await scrapeConversationWithHistory(sendCdpCommand, conv.id, conv.name, 2);
     messagesByConv[conv.id] = msgs;
