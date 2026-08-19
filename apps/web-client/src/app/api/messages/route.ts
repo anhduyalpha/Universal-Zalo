@@ -6,9 +6,14 @@ export async function GET(req: Request) {
   const gatewayUrl = process.env.GATEWAY_HUB_INTERNAL_URL || "http://gateway-hub:8080";
   const { searchParams } = new URL(req.url);
   const convId = searchParams.get("conversationId") || "";
+  const convName = searchParams.get("convName") || "";
+  const refresh = searchParams.get("refresh") || "";
 
   try {
-    const res = await fetch(`${gatewayUrl}/api/messages?conversationId=${convId}`, { cache: "no-store" });
+    const res = await fetch(
+      `${gatewayUrl}/api/messages?conversationId=${encodeURIComponent(convId)}&convName=${encodeURIComponent(convName)}&refresh=${refresh}`,
+      { cache: "no-store" }
+    );
     if (!res.ok) {
       return NextResponse.json([]);
     }

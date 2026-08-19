@@ -14,9 +14,12 @@ export default function ZaloMultiDeviceApp() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [navTab, setNavTab] = useState<"MESSAGES" | "CONTACTS" | "SETTINGS">("MESSAGES");
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Lấy dữ liệu từ IndexedDB (Dexie)
   const localConversations = useLiveQuery(() => db.conversations.toArray(), []) || [];
@@ -24,6 +27,8 @@ export default function ZaloMultiDeviceApp() {
     () => db.messages.where("conversationId").equals(activeConvId).sortBy("timestamp"),
     [activeConvId]
   ) || [];
+
+  const currentActiveConv = localConversations.find((c) => c.id === activeConvId) || localConversations[0];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -50,9 +55,10 @@ export default function ZaloMultiDeviceApp() {
   };
 
   // Tải toàn bộ tin nhắn & Media đã lưu trên Server Volume cho cuộc hội thoại hiện tại
-  const fetchServerMessages = async (convId: string) => {
+  const fetchServerMessages = async (convId: string, convName?: string, refresh: boolean = false) => {
     try {
-      const res = await fetch(`/api/messages?conversationId=${convId}`);
+      const targetName = convName || currentActiveConv?.name || "";
+      const res = await fetch(`/api/messages?conversationId=${encodeURIComponent(convId)}&convName=${encodeURIComponent(targetName)}&refresh=${refresh}`);
       if (res.ok) {
         const msgs: LocalMessage[] = await res.json();
         if (msgs && msgs.length > 0) {
@@ -73,9 +79,25 @@ export default function ZaloMultiDeviceApp() {
     } catch (e) {}
   };
 
+  // Khi người dùng chọn cuộc hội thoại, tự động chuyển chat trên Chromium và cào tin nhắn
+  const handleSelectConversation = (conv: Conversation) => {
+    setActiveConvId(conv.id);
+    fetchServerMessages(conv.id, conv.name);
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "SELECT_CONVERSATION",
+          conversationId: conv.id,
+          conversationName: conv.name,
+        })
+      );
+    }
+  };
+
   useEffect(() => {
-    if (activeConvId) {
-      fetchServerMessages(activeConvId);
+    if (activeConvId && currentActiveConv) {
+      fetchServerMessages(activeConvId, currentActiveConv.name);
     }
   }, [activeConvId]);
 
@@ -128,7 +150,7 @@ export default function ZaloMultiDeviceApp() {
     }
   }, [activeConvId]);
 
-  // Gửi tin nhắn
+  // Gửi tin nhắn Text
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim()) return;
@@ -157,6 +179,7 @@ export default function ZaloMultiDeviceApp() {
         JSON.stringify({
           type: "SEND_MESSAGE",
           conversationId: targetConvId,
+          conversationName: currentActiveConv?.name,
           textContent: inputText,
           idempotencyKey: tempMsgId,
         })
@@ -166,15 +189,65 @@ export default function ZaloMultiDeviceApp() {
     setInputText("");
   };
 
+  // Upload Ảnh / Tệp đính kèm lên Server Volume
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    const targetConvId = activeConvId || "conv_1";
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64Data = reader.result as string;
+        const res = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            data: base64Data,
+            filename: file.name,
+            conversationId: targetConvId,
+            caption: inputText,
+          }),
+        });
+
+        if (res.ok) {
+          const result = await res.json();
+          if (result.message) {
+            await db.messages.put({
+              msgId: result.message.msgId,
+              conversationId: targetConvId,
+              textContent: result.message.textContent,
+              sender: "ME",
+              status: "DELIVERED",
+              timestamp: Date.now(),
+              type: "IMAGE",
+              mediaUrl: result.message.mediaUrl,
+            });
+          }
+        }
+        setUploading(false);
+        setInputText("");
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      setUploading(false);
+    }
+  };
+
   // Kích hoạt đồng bộ tin nhắn từ Zalo Cloud
   const handleTriggerSync = async () => {
     setIsSyncing(true);
-    setSyncFeedback("Đang kích hoạt đồng bộ tin nhắn từ Zalo Cloud...");
+    setSyncFeedback("Đang tải toàn bộ lịch sử tin nhắn từ Zalo Cloud...");
     try {
       const res = await fetch("/api/sync", { method: "POST" });
       const data = await res.json();
-      setSyncFeedback(data.message || "Đã gửi lệnh đồng bộ.");
+      setSyncFeedback(data.message || "Đã kích hoạt đồng bộ.");
       await fetchLiveConversations();
+      if (activeConvId && currentActiveConv) {
+        await fetchServerMessages(activeConvId, currentActiveConv.name, true);
+      }
       setTimeout(() => setSyncFeedback(null), 5000);
     } catch (e: any) {
       setSyncFeedback(`Lỗi: ${e.message}`);
@@ -187,8 +260,6 @@ export default function ZaloMultiDeviceApp() {
   const filteredConversations = localConversations.filter((c) =>
     c.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
-
-  const currentActiveConv = localConversations.find((c) => c.id === activeConvId) || localConversations[0];
 
   return (
     <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden", background: "#f0f2f5", fontFamily: "system-ui, -apple-system, sans-serif" }}>
@@ -270,7 +341,7 @@ export default function ZaloMultiDeviceApp() {
               return (
                 <div
                   key={conv.id}
-                  onClick={() => setActiveConvId(conv.id)}
+                  onClick={() => handleSelectConversation(conv)}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -335,10 +406,10 @@ export default function ZaloMultiDeviceApp() {
 
           <div style={{ display: "flex", gap: 10 }}>
             <button
-              onClick={handleTriggerSync}
+              onClick={() => currentActiveConv && fetchServerMessages(activeConvId, currentActiveConv.name, true)}
               style={{ padding: "7px 14px", background: "#f1f5f9", color: "#0068ff", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}
             >
-              ⚡ Đồng bộ tin nhắn
+              🔄 Tải lại tin nhắn
             </button>
             <Link
               href="/session"
@@ -354,8 +425,8 @@ export default function ZaloMultiDeviceApp() {
           {activeMessages.length === 0 ? (
             <div style={{ margin: "auto", textAlign: "center", color: "#94a3b8" }}>
               <div style={{ fontSize: 40, marginBottom: 10 }}>💬</div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: "#475569" }}>Chưa có tin nhắn trong cuộc trò chuyện này</div>
-              <div style={{ fontSize: 13, marginTop: 4 }}>Hãy gửi tin nhắn đầu tiên bên dưới!</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#475569" }}>Lịch sử tin nhắn của {currentActiveConv?.name || "cuộc hội thoại"}</div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>Bấm <b>"🔄 Tải lại tin nhắn"</b> ở trên để cào thêm tin nhắn từ Zalo!</div>
             </div>
           ) : (
             activeMessages.map((m) => (
@@ -378,14 +449,15 @@ export default function ZaloMultiDeviceApp() {
                   <img
                     src={m.mediaUrl}
                     alt="Media Attachment"
-                    style={{ maxWidth: "100%", maxHeight: 260, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain" }}
+                    onClick={() => setPreviewImage(m.mediaUrl || null)}
+                    style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
                   />
                 )}
                 {m.mediaUrl && m.type === "VIDEO" && (
                   <video
                     controls
                     src={m.mediaUrl}
-                    style={{ maxWidth: "100%", maxHeight: 260, borderRadius: 8, marginBottom: 6, display: "block" }}
+                    style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
                   />
                 )}
                 {m.mediaUrl && m.type === "VOICE" && (
@@ -406,10 +478,32 @@ export default function ZaloMultiDeviceApp() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input Composer */}
+        {/* Modal Xem ảnh lớn */}
+        {previewImage && (
+          <div
+            onClick={() => setPreviewImage(null)}
+            style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+          >
+            <img src={previewImage} alt="Large preview" style={{ maxWidth: "90%", maxHeight: "90%", borderRadius: 8 }} />
+          </div>
+        )}
+
+        {/* Input Composer có hỗ trợ Tải file & Gửi ảnh */}
         <form onSubmit={handleSendMessage} style={{ padding: "14px 20px", borderTop: "1px solid #e5e7eb", background: "#ffffff", display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
-          <button type="button" title="Gửi ảnh / Tệp" style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}>
-            📎
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            accept="image/*,video/*,.pdf,.doc,.docx"
+            style={{ display: "none" }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Gửi ảnh / Tệp tin"
+            style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}
+          >
+            {uploading ? "⏳" : "📎"}
           </button>
           <button type="button" title="Emoji & Sticker" style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}>
             😊
