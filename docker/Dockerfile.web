@@ -7,6 +7,7 @@ WORKDIR /app
 
 COPY apps/web-client/package.json ./
 COPY apps/web-client/tsconfig.json ./
+COPY apps/web-client/next.config.mjs ./
 
 RUN npm install
 
@@ -23,6 +24,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 
 COPY apps/web-client/package.json ./
+COPY apps/web-client/next.config.mjs ./
 RUN npm install --only=production
 
 COPY --from=builder /app/.next ./.next

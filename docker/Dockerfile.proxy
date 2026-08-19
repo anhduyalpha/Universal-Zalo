@@ -14,7 +14,7 @@ COPY crates ./crates
 
 # Fix MSRV cho time crate và build release binaries
 RUN cargo update -p time --precise 0.3.36 || true
-RUN cargo build --release -p zalo-proxy -p zalo-daemon
+RUN cargo build --release -p zalo-proxy
 
 # Runtime container siêu nhẹ trên Debian Bookworm
 FROM debian:bookworm-slim
@@ -28,7 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/src/app/target/release/zalo-proxy /app/zalo-proxy
-COPY --from=builder /usr/src/app/target/release/zalo-daemon /app/zalo-daemon
 
 EXPOSE 9050
 

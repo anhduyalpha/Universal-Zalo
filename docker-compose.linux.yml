@@ -48,6 +48,8 @@ services:
     restart: unless-stopped
     depends_on:
       - zalo-proxy
+    ports:
+      - "0.0.0.0:9222:9222"
     volumes:
       - certs_data:/app/certs:ro
       - chrome_profile:/app/profile
