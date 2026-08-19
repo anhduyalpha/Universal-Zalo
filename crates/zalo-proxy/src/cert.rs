@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
-    KeyUsagePurpose, SanType,
+    KeyUsagePurpose,
 };
 use std::fs;
 use std::path::Path;
@@ -22,49 +22,43 @@ impl CertAuthority {
         let ca_cert_path = cert_dir.join("ca.crt");
         let ca_key_path = cert_dir.join("ca.key");
 
-        if ca_cert_path.exists() && ca_key_path.exists() {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "Universal Zalo Root CA");
+        dn.push(DnType::OrganizationName, "Universal Zalo Security");
+        params.distinguished_name = dn;
+
+        let (ca_cert, ca_keypair) = if ca_cert_path.exists() && ca_key_path.exists() {
             let key_pem = fs::read_to_string(&ca_key_path)?;
             let keypair = KeyPair::from_pem(&key_pem).context("Failed to parse CA key PEM")?;
-
-            let cert_pem = fs::read_to_string(&ca_cert_path)?;
-            let params = CertificateParams::from_ca_cert_pem(&cert_pem)
-                .context("Failed to parse CA cert PEM")?;
-            let ca_cert = params.self_signed(&keypair)?;
-
-            Ok(Self {
-                ca_cert,
-                ca_keypair: keypair,
-            })
+            let cert = params.self_signed(&keypair)?;
+            (cert, keypair)
         } else {
-            let mut params = CertificateParams::default();
-            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            params.key_usages = vec![
-                KeyUsagePurpose::KeyCertSign,
-                KeyUsagePurpose::CrlSign,
-                KeyUsagePurpose::DigitalSignature,
-            ];
-            let mut dn = DistinguishedName::new();
-            dn.push(DnType::CommonName, "Universal Zalo Root CA");
-            dn.push(DnType::OrganizationName, "Universal Zalo Security");
-            params.distinguished_name = dn;
-
             let keypair = KeyPair::generate().context("Failed to generate CA keypair")?;
-            let ca_cert = params.self_signed(&keypair)?;
+            let cert = params.self_signed(&keypair)?;
 
-            fs::write(&ca_cert_path, ca_cert.pem())?;
+            fs::write(&ca_cert_path, cert.pem())?;
             fs::write(&ca_key_path, keypair.serialize_pem())?;
 
             tracing::info!("Created new Root CA certificate at: {:?}", ca_cert_path);
-            Ok(Self {
-                ca_cert,
-                ca_keypair: keypair,
-            })
-        }
+            (cert, keypair)
+        };
+
+        Ok(Self {
+            ca_cert,
+            ca_keypair,
+        })
     }
 
     pub fn generate_server_config(&self, domain: &str) -> Result<Arc<ServerConfig>> {
-        let mut params = CertificateParams::default();
-        params.subject_alt_names = vec![SanType::DnsName(domain.to_string().try_into()?)];
+        let mut params = CertificateParams::new(vec![domain.to_string()])
+            .context("Failed to initialize CertificateParams")?;
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, domain);
         params.distinguished_name = dn;

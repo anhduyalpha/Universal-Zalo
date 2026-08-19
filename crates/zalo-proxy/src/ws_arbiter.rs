@@ -20,7 +20,7 @@ impl WsArbiter {
         let (mut client_write, mut client_read) = client_ws.split();
         let (mut server_write, mut server_read) = server_ws.split();
 
-        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(256);
+        let (_outbound_tx, mut outbound_rx) = mpsc::channel::<Message>(256);
         let ipc_tx_inbound = ipc_tx.clone();
 
         // 1. Luồng Downstream: Zalo Cloud -> Browser (Sniff Inbound)
