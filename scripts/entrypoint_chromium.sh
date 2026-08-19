@@ -10,11 +10,8 @@ while [ ! -f "$CERT_PATH" ]; do
   sleep 1
 done
 
-echo "🔐 Cài đặt Root CA vào Chromium NSS DB..."
-mkdir -p "$HOME/.pki/nssdb"
-touch /tmp/pwd.txt
-certutil -d sql:$HOME/.pki/nssdb -N -f /tmp/pwd.txt || true
-certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Universal Zalo Root CA" -i "$CERT_PATH" -f /tmp/pwd.txt || true
+echo "🧹 Dọn dẹp stale lock files..."
+rm -f /app/profile/SingletonLock /app/profile/SingletonCookie /app/profile/SingletonSocket /app/profile/Default/SingletonLock /app/profile/Default/SingletonCookie || true
 
 echo "🌐 Bật socat port forwarder 0.0.0.0:9222 -> 127.0.0.1:9223..."
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
