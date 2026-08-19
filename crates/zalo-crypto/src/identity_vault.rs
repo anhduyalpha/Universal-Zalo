@@ -1,44 +1,35 @@
-use anyhow::{Context, Result};
-use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use x25519_dalek::{PublicKey, StaticSecret};
 
-/// Immutable Identity Key Vault lưu trữ cặp khóa Curve25519
-/// Sử dụng cơ chế zeroize để xóa trắng RAM khi drop
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct IdentityKeyPair {
-    private_key: [u8; 32],
-    public_key: [u8; 32],
+    pub secret: StaticSecret,
+    pub public: PublicKey,
 }
 
 impl IdentityKeyPair {
     pub fn generate() -> Self {
-        let mut rng = OsRng;
-        let scalar = Scalar::random(&mut rng);
-        let public = curve25519_dalek::constants::ED25519_BASEPOINT_TABLE * &scalar;
-        
-        let private_bytes = scalar.to_bytes();
-        let public_bytes = public.to_montgomery().to_bytes();
-
-        Self {
-            private_key: private_bytes,
-            public_key: public_bytes,
-        }
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&secret);
+        Self { secret, public }
     }
 
-    pub fn from_raw_bytes(private_bytes: [u8; 32], public_bytes: [u8; 32]) -> Self {
-        Self {
-            private_key: private_bytes,
-            public_key: public_bytes,
-        }
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(bytes);
+        let public = PublicKey::from(&secret);
+        Self { secret, public }
     }
 
     pub fn public_key_bytes(&self) -> [u8; 32] {
-        self.public_key
+        *self.public.as_bytes()
     }
 
     pub fn private_key_bytes(&self) -> [u8; 32] {
-        self.private_key
+        self.secret.to_bytes()
+    }
+
+    pub fn diffie_hellman(&self, their_public: &[u8; 32]) -> [u8; 32] {
+        let their_point = PublicKey::from(*their_public);
+        *self.secret.diffie_hellman(&their_point).as_bytes()
     }
 }
 
@@ -65,7 +56,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_identity_key_generation_and_zeroize() {
+    fn test_identity_key_generation() {
         let vault = IdentityVault::new(IdentityKeyPair::generate());
         assert_ne!(vault.get_public_key(), [0u8; 32]);
     }

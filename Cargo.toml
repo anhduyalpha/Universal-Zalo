@@ -18,7 +18,7 @@ license = "MIT"
 tokio = { version = "1.38", features = ["full"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2.1"
-rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+rcgen = { version = "0.13", features = ["pem", "ring"] }
 time = "=0.3.36"
 time-core = "=0.1.2"
 tokio-tungstenite = "0.23"
@@ -32,7 +32,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 prost = "0.13"
 prost-types = "0.13"
-curve25519-dalek = "4.1"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 aes-gcm = "0.10"
 sha2 = "0.10"
 hkdf = "0.12"

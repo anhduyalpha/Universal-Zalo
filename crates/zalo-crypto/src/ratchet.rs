@@ -1,6 +1,6 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -30,12 +30,14 @@ impl RatchetState {
     }
 
     fn kdf_ck(chain_key: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-        let mut mac = HmacSha256::new_from_slice(chain_key).expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(chain_key).expect("HMAC can take key of any size");
         mac.update(&[0x01]);
         let mut next_chain_key = [0u8; 32];
         next_chain_key.copy_from_slice(&mac.finalize().into_bytes());
 
-        let mut mac2 = HmacSha256::new_from_slice(chain_key).expect("HMAC can take key of any size");
+        let mut mac2 =
+            HmacSha256::new_from_slice(chain_key).expect("HMAC can take key of any size");
         mac2.update(&[0x02]);
         let mut message_key = [0u8; 32];
         message_key.copy_from_slice(&mac2.finalize().into_bytes());
@@ -49,24 +51,26 @@ impl RatchetState {
         let index = self.send_msg_index;
         self.send_msg_index += 1;
 
-        let cipher = Aes256Gcm::new_from_slice(&msg_key)?;
-        let nonce_bytes = [0u8; 12]; // In production derived from sequence counter
+        let cipher = Aes256Gcm::new_from_slice(&msg_key)
+            .map_err(|e| anyhow::anyhow!("AES-GCM key init error: {:?}", e))?;
+        let nonce_bytes = [0u8; 12];
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = cipher.encrypt(nonce, plaintext)
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext)
             .map_err(|e| anyhow::anyhow!("AES-GCM encryption error: {:?}", e))?;
 
         Ok((index, ciphertext))
     }
 
     pub fn decrypt(&mut self, index: u32, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        // Handle skipped keys if message arrives late
         let msg_key = if let Some(key) = self.skipped_keys.remove(&index.to_string()) {
             key
         } else {
             while self.recv_msg_index < index {
                 let (next_ck, skipped_mk) = Self::kdf_ck(&self.recv_chain_key);
                 self.recv_chain_key = next_ck;
-                self.skipped_keys.insert(self.recv_msg_index.to_string(), skipped_mk);
+                self.skipped_keys
+                    .insert(self.recv_msg_index.to_string(), skipped_mk);
                 self.recv_msg_index += 1;
             }
             let (next_ck, mk) = Self::kdf_ck(&self.recv_chain_key);
@@ -75,10 +79,12 @@ impl RatchetState {
             mk
         };
 
-        let cipher = Aes256Gcm::new_from_slice(&msg_key)?;
+        let cipher = Aes256Gcm::new_from_slice(&msg_key)
+            .map_err(|e| anyhow::anyhow!("AES-GCM key init error: {:?}", e))?;
         let nonce_bytes = [0u8; 12];
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext = cipher.decrypt(nonce, ciphertext)
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
             .map_err(|e| anyhow::anyhow!("AES-GCM decryption error: {:?}", e))?;
 
         Ok(plaintext)
@@ -102,18 +108,15 @@ mod tests {
         let pt1 = bob.decrypt(idx1, &ct1).unwrap();
         assert_eq!(pt1, msg1);
 
-        // Test out of order with skipped key
         let msg2 = b"Message 2 (will be skipped)";
         let msg3 = b"Message 3 (received first)";
 
         let (idx2, ct2) = alice.encrypt(msg2).unwrap();
         let (idx3, ct3) = alice.encrypt(msg3).unwrap();
 
-        // Bob nhận message 3 trước
         let pt3 = bob.decrypt(idx3, &ct3).unwrap();
         assert_eq!(pt3, msg3);
 
-        // Sau đó Bob nhận message 2
         let pt2 = bob.decrypt(idx2, &ct2).unwrap();
         assert_eq!(pt2, msg2);
     }

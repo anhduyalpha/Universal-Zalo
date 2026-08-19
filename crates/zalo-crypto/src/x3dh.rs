@@ -1,9 +1,6 @@
 use crate::identity_vault::IdentityKeyPair;
-use anyhow::{bail, Result};
-use curve25519_dalek::montgomery::MontgomeryPoint;
-use curve25519_dalek::scalar::Scalar;
+use anyhow::Result;
 use hkdf::Hkdf;
-use rand::rngs::OsRng;
 use sha2::Sha256;
 
 pub struct PreKeyBundle {
@@ -15,12 +12,6 @@ pub struct PreKeyBundle {
 pub struct X3dhEngine;
 
 impl X3dhEngine {
-    fn dh(private_bytes: &[u8; 32], public_bytes: &[u8; 32]) -> [u8; 32] {
-        let scalar = Scalar::from_bits(*private_bytes);
-        let point = MontgomeryPoint(*public_bytes);
-        (point * scalar).to_bytes()
-    }
-
     /// Tính toán X3DH với cơ chế 3-Way DH Fallback khi OTPK cạn kiệt
     pub fn derive_shared_key(
         alice_ik: &IdentityKeyPair,
@@ -28,11 +19,11 @@ impl X3dhEngine {
         bob_bundle: &PreKeyBundle,
     ) -> Result<[u8; 32]> {
         // DH1 = DH(IK_A, SPK_B)
-        let dh1 = Self::dh(&alice_ik.private_key_bytes(), &bob_bundle.signed_prekey);
+        let dh1 = alice_ik.diffie_hellman(&bob_bundle.signed_prekey);
         // DH2 = DH(EK_A, IK_B)
-        let dh2 = Self::dh(&alice_ek.private_key_bytes(), &bob_bundle.identity_key);
+        let dh2 = alice_ek.diffie_hellman(&bob_bundle.identity_key);
         // DH3 = DH(EK_A, SPK_B)
-        let dh3 = Self::dh(&alice_ek.private_key_bytes(), &bob_bundle.signed_prekey);
+        let dh3 = alice_ek.diffie_hellman(&bob_bundle.signed_prekey);
 
         let mut ikm = Vec::with_capacity(128);
         ikm.extend_from_slice(&dh1);
@@ -41,7 +32,7 @@ impl X3dhEngine {
 
         if let Some(opk) = bob_bundle.one_time_prekey {
             // 4-Way DH: DH4 = DH(EK_A, OPK_B)
-            let dh4 = Self::dh(&alice_ek.private_key_bytes(), &opk);
+            let dh4 = alice_ek.diffie_hellman(&opk);
             ikm.extend_from_slice(&dh4);
         } else {
             tracing::info!("⚠️ OTPK Pool empty: Fallback to 3-Way DH standard!");
@@ -75,7 +66,8 @@ mod tests {
             signed_prekey: bob_spk.public_key_bytes(),
             one_time_prekey: Some(bob_opk.public_key_bytes()),
         };
-        let key_4way = X3dhEngine::derive_shared_key(&alice_ik, &alice_ek, &bundle_with_opk).unwrap();
+        let key_4way =
+            X3dhEngine::derive_shared_key(&alice_ik, &alice_ek, &bundle_with_opk).unwrap();
         assert_ne!(key_4way, [0u8; 32]);
 
         // 2. Thử 3-Way Fallback DH (Không có OTPK)
@@ -84,7 +76,8 @@ mod tests {
             signed_prekey: bob_spk.public_key_bytes(),
             one_time_prekey: None,
         };
-        let key_3way = X3dhEngine::derive_shared_key(&alice_ik, &alice_ek, &bundle_empty_opk).unwrap();
+        let key_3way =
+            X3dhEngine::derive_shared_key(&alice_ik, &alice_ek, &bundle_empty_opk).unwrap();
         assert_ne!(key_3way, [0u8; 32]);
         assert_ne!(key_4way, key_3way);
     }
