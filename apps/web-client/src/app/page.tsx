@@ -1,23 +1,61 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { db, LocalMessage } from "../lib/dexie_db";
+import { db, Conversation, LocalMessage, seedInitialConversations } from "../lib/dexie_db";
 import { useLiveQuery } from "dexie-react-hooks";
 import { nanoid } from "nanoid";
+import Link from "next/link";
 
-export default function ChatDashboard() {
+export default function ZaloMultiDeviceApp() {
+  const [activeConvId, setActiveConvId] = useState<string>("conv_1");
   const [inputText, setInputText] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [wsStatus, setWsStatus] = useState<"CONNECTED" | "DISCONNECTED" | "CONNECTING">("CONNECTING");
-  const [showQrModal, setShowQrModal] = useState(false);
-  const [qrTimestamp, setQrTimestamp] = useState(Date.now());
-  const [qrLoading, setQrLoading] = useState(true);
-  const [qrError, setQrError] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [navTab, setNavTab] = useState<"MESSAGES" | "CONTACTS" | "SETTINGS">("MESSAGES");
+
   const wsRef = useRef<WebSocket | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  const messages = useLiveQuery(() => db.messages.orderBy("timestamp").toArray(), []) || [];
+  // Lấy dữ liệu từ IndexedDB (Dexie)
+  const localConversations = useLiveQuery(() => db.conversations.toArray(), []) || [];
+  const activeMessages = useLiveQuery(
+    () => db.messages.where("conversationId").equals(activeConvId).sortBy("timestamp"),
+    [activeConvId]
+  ) || [];
 
+  // Tự động cuộn xuống cuối khi có tin nhắn mới
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeMessages]);
+
+  // Đồng bộ danh sách hội thoại từ Chromium Master Session
+  const fetchLiveConversations = async () => {
+    try {
+      const res = await fetch("/api/conversations");
+      if (res.ok) {
+        const liveConvs: Conversation[] = await res.json();
+        if (liveConvs && liveConvs.length > 0) {
+          for (const conv of liveConvs) {
+            await db.conversations.put(conv);
+          }
+          if (!activeConvId && liveConvs[0]) {
+            setActiveConvId(liveConvs[0].id);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to fetch live conversations:", e);
+    }
+  };
+
+  // Khởi tạo và kết nối WebSocket Gateway
   useEffect(() => {
     if (typeof window !== "undefined") {
+      seedInitialConversations();
+      fetchLiveConversations();
+
       const hostname = window.location.hostname || "127.0.0.1";
       const wsUrl = `ws://${hostname}:8080`;
       const ws = new WebSocket(wsUrl);
@@ -30,14 +68,21 @@ export default function ChatDashboard() {
         try {
           const data = JSON.parse(event.data);
           if (data.event === "MESSAGE_FANOUT") {
+            const convId = data.conversationId || activeConvId || "conv_1";
             await db.messages.add({
               msgId: data.msgId,
-              conversationId: data.conversationId || "general",
+              conversationId: convId,
               textContent: data.textContent,
               sender: "OTHER",
               status: "DELIVERED",
               timestamp: data.hlc?.physicalTime || Date.now(),
               type: "TEXT",
+            });
+
+            // Cập nhật last message trong danh sách hội thoại
+            await db.conversations.update(convId, {
+              lastMessage: data.textContent,
+              lastTimestamp: Date.now(),
             });
           }
         } catch (e) {
@@ -45,29 +90,29 @@ export default function ChatDashboard() {
         }
       };
 
+      // Tự động kiểm tra và cập nhật danh sách hội thoại định kỳ
+      const timer = setInterval(fetchLiveConversations, 10000);
+
       return () => {
+        clearInterval(timer);
         ws.close();
       };
     }
-  }, []);
+  }, [activeConvId]);
 
-  const refreshQr = () => {
-    setQrLoading(true);
-    setQrError(null);
-    setQrTimestamp(Date.now());
-  };
-
+  // Gửi tin nhắn
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim()) return;
 
     const tempMsgId = nanoid();
     const now = Date.now();
+    const targetConvId = activeConvId || "conv_1";
 
-    // 1. Lưu ngay vào IndexedDB nội bộ với trạng thái SENDING
+    // 1. Lưu ngay vào IndexedDB nội bộ với trạng thái SENDING (Optimistic UI)
     await db.messages.add({
       msgId: tempMsgId,
-      conversationId: "general",
+      conversationId: targetConvId,
       textContent: inputText,
       sender: "ME",
       status: "SENDING",
@@ -75,12 +120,18 @@ export default function ChatDashboard() {
       type: "TEXT",
     });
 
-    // 2. Gửi qua WebSocket
+    // 2. Cập nhật last message của conversation
+    await db.conversations.update(targetConvId, {
+      lastMessage: `Bạn: ${inputText}`,
+      lastTimestamp: now,
+    });
+
+    // 3. Gửi qua WebSocket tới Gateway Hub
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: "SEND_MESSAGE",
-          conversationId: "general",
+          conversationId: targetConvId,
           textContent: inputText,
           idempotencyKey: tempMsgId,
         })
@@ -90,132 +141,253 @@ export default function ChatDashboard() {
     setInputText("");
   };
 
+  // Kích hoạt đồng bộ tin nhắn từ Zalo Cloud
+  const handleTriggerSync = async () => {
+    setIsSyncing(true);
+    setSyncFeedback("Đang kích hoạt đồng bộ tin nhắn từ Zalo Cloud...");
+    try {
+      const res = await fetch("/api/sync", { method: "POST" });
+      const data = await res.json();
+      setSyncFeedback(data.message || "Đã gửi lệnh đồng bộ.");
+      await fetchLiveConversations();
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } catch (e: any) {
+      setSyncFeedback(`Lỗi: ${e.message}`);
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Danh sách hội thoại lọc theo từ khóa tìm kiếm
+  const filteredConversations = localConversations.filter((c) =>
+    c.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const currentActiveConv = localConversations.find((c) => c.id === activeConvId) || localConversations[0];
+
   return (
-    <div style={{ maxWidth: 850, margin: "20px auto", background: "#fff", borderRadius: 12, boxShadow: "0 4px 16px rgba(0,0,0,0.1)", overflow: "hidden", display: "flex", flexDirection: "column", height: "90vh", position: "relative" }}>
-      {/* Header */}
-      <div style={{ padding: "14px 20px", borderBottom: "1px solid #e5e7eb", background: "#0068ff", color: "#fff", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>Universal Zalo Multi-Device Web Client</h2>
-          <small style={{ opacity: 0.85 }}>Sub-Client PWA Session</small>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+    <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden", background: "#f0f2f5", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+      {/* 1. Thanh Menu Điều Hướng Cột Trái Cùng (Far-left Icon Nav) */}
+      <div style={{ width: 64, background: "#0068ff", display: "flex", flexDirection: "column", alignItems: "center", padding: "16px 0", justifyContent: "space-between", flexShrink: 0 }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 20, width: "100%" }}>
+          {/* Logo / Avatar */}
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold", color: "#0068ff", fontSize: 18, boxShadow: "0 2px 6px rgba(0,0,0,0.15)" }}>
+            Z
+          </div>
+
+          {/* Nav Icons */}
           <button
-            onClick={() => {
-              refreshQr();
-              setShowQrModal(true);
-            }}
-            style={{ padding: "6px 14px", background: "#ffffff", color: "#0068ff", border: "none", borderRadius: 18, fontWeight: 600, fontSize: 13, cursor: "pointer", boxShadow: "0 2px 4px rgba(0,0,0,0.1)" }}
+            onClick={() => setNavTab("MESSAGES")}
+            title="Tin nhắn"
+            style={{ width: 44, height: 44, borderRadius: 12, background: navTab === "MESSAGES" ? "rgba(255,255,255,0.2)" : "transparent", border: "none", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
           >
-            📲 Quét mã QR Zalo
+            💬
           </button>
-          <span style={{ fontSize: 12, padding: "4px 10px", borderRadius: 12, background: wsStatus === "CONNECTED" ? "#10b981" : "#ef4444", fontWeight: 500 }}>
-            {wsStatus}
-          </span>
+          <button
+            onClick={() => setNavTab("CONTACTS")}
+            title="Danh bạ"
+            style={{ width: 44, height: 44, borderRadius: 12, background: navTab === "CONTACTS" ? "rgba(255,255,255,0.2)" : "transparent", border: "none", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+          >
+            👥
+          </button>
+        </div>
+
+        {/* Bottom Actions */}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+          <Link
+            href="/session"
+            title="Xem màn hình Master Session"
+            style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(255,255,255,0.15)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", textDecoration: "none", fontSize: 18 }}
+          >
+            🖥️
+          </Link>
+          <div
+            title={`Trạng thái kết nối: ${wsStatus}`}
+            style={{ width: 12, height: 12, borderRadius: "50%", background: wsStatus === "CONNECTED" ? "#10b981" : "#ef4444", boxShadow: "0 0 6px rgba(0,0,0,0.3)" }}
+          />
         </div>
       </div>
 
-      {/* QR Modal */}
-      {showQrModal && (
-        <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, backdropFilter: "blur(4px)" }}>
-          <div style={{ background: "#fff", padding: 24, borderRadius: 16, width: 480, maxWidth: "90%", textAlign: "center", boxShadow: "0 10px 25px rgba(0,0,0,0.2)" }}>
-            <h3 style={{ margin: "0 0 10px 0", color: "#1f2937", fontSize: 18 }}>Quét mã QR để Đăng nhập Zalo</h3>
-            <p style={{ margin: "0 0 16px 0", fontSize: 13, color: "#6b7280" }}>
-              Mở ứng dụng Zalo trên điện thoại $\rightarrow$ Chọn biểu tượng Quét mã QR trên đầu màn hình.
-            </p>
-
-            <div style={{ minHeight: 300, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#f9fafb", borderRadius: 12, overflow: "hidden", border: "1px solid #e5e7eb", position: "relative" }}>
-              {qrLoading && (
-                <div style={{ padding: 20, color: "#0068ff", fontSize: 14, fontWeight: 500 }}>
-                  ⏳ Đang chụp màn hình mã QR từ Server...
-                </div>
-              )}
-              {qrError && (
-                <div style={{ padding: 20, color: "#ef4444", fontSize: 13 }}>
-                  ⚠️ {qrError}
-                  <br />
-                  <small style={{ color: "#6b7280" }}>Chromium có thể đang tải trang chat.zalo.me, hãy bấm "Làm mới ảnh".</small>
-                </div>
-              )}
-              <img
-                src={`/api/qr?t=${qrTimestamp}`}
-                alt="Zalo QR Code Live"
-                style={{ width: "100%", height: "auto", display: qrError ? "none" : "block" }}
-                onLoad={() => {
-                  setQrLoading(false);
-                  setQrError(null);
-                }}
-                onError={() => {
-                  setQrLoading(false);
-                  setQrError("Chưa thể tải ảnh mã QR. Hãy bấm Làm mới.");
-                }}
-              />
-            </div>
-
-            <div style={{ marginTop: 18, display: "flex", gap: 10, justifyContent: "center" }}>
-              <button
-                onClick={refreshQr}
-                style={{ padding: "8px 18px", background: "#f3f4f6", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer" }}
-              >
-                🔄 Làm mới ảnh
-              </button>
-              <button
-                onClick={() => setShowQrModal(false)}
-                style={{ padding: "8px 22px", background: "#0068ff", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-              >
-                Đã đăng nhập xong
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Messages View */}
-      <div style={{ flex: 1, padding: 20, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc" }}>
-        {messages.length === 0 ? (
-          <div style={{ textAlign: "center", color: "#9ca3af", marginTop: 60, fontSize: 14 }}>
-            Chưa có tin nhắn. Hãy bấm <b>"📲 Quét mã QR Zalo"</b> ở góc trên để liên kết tài khoản!
-          </div>
-        ) : (
-          messages.map((m) => (
-            <div
-              key={m.msgId}
-              style={{
-                alignSelf: m.sender === "ME" ? "flex-end" : "flex-start",
-                maxWidth: "70%",
-                background: m.sender === "ME" ? "#0068ff" : "#ffffff",
-                color: m.sender === "ME" ? "#ffffff" : "#1f2937",
-                padding: "10px 14px",
-                borderRadius: 14,
-                borderBottomRightRadius: m.sender === "ME" ? 2 : 14,
-                borderBottomLeftRadius: m.sender === "OTHER" ? 2 : 14,
-                boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-              }}
+      {/* 2. Cột Danh Sách Hội Thoại (Conversations Sidebar) */}
+      <div style={{ width: 340, background: "#ffffff", borderRight: "1px solid #e5e7eb", display: "flex", flexDirection: "column", flexShrink: 0 }}>
+        {/* Header tìm kiếm */}
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #f1f5f9" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1e293b" }}>Hội thoại</h2>
+            <button
+              onClick={handleTriggerSync}
+              disabled={isSyncing}
+              title="Đồng bộ danh sách từ Zalo Web"
+              style={{ padding: "4px 10px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 14, fontSize: 12, fontWeight: 600, color: "#0068ff", cursor: "pointer" }}
             >
-              <div style={{ fontSize: 14 }}>{m.textContent}</div>
-              <div style={{ fontSize: 10, color: m.sender === "ME" ? "rgba(255,255,255,0.75)" : "#9ca3af", marginTop: 4, textAlign: "right" }}>
-                {new Date(m.timestamp).toLocaleTimeString()} {m.sender === "ME" && (m.status === "SENDING" ? "⏳" : "✓✓")}
+              {isSyncing ? "⏳ Đang sync..." : "🔄 Đồng bộ"}
+            </button>
+          </div>
+          <input
+            type="text"
+            placeholder="🔍 Tìm kiếm tin nhắn, liên hệ..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{ width: "100%", padding: "8px 14px", background: "#f1f5f9", border: "none", borderRadius: 8, outline: "none", fontSize: 13, boxSizing: "border-box" }}
+          />
+        </div>
+
+        {/* Thông báo Feedback nếu có */}
+        {syncFeedback && (
+          <div style={{ padding: "8px 14px", background: "#e0f2fe", fontSize: 12, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>
+            💡 {syncFeedback}
+          </div>
+        )}
+
+        {/* Danh sách các cuộc trò chuyện */}
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {filteredConversations.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: "#94a3b8", fontSize: 14 }}>
+              Đang tải danh sách hội thoại từ Zalo...
+            </div>
+          ) : (
+            filteredConversations.map((conv) => {
+              const isSelected = conv.id === activeConvId;
+              return (
+                <div
+                  key={conv.id}
+                  onClick={() => setActiveConvId(conv.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    padding: "12px 16px",
+                    gap: 12,
+                    cursor: "pointer",
+                    background: isSelected ? "#e5efff" : "transparent",
+                    borderBottom: "1px solid #f8fafc",
+                    transition: "background 0.15s ease",
+                  }}
+                >
+                  <img
+                    src={conv.avatar}
+                    alt={conv.name}
+                    style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).src = `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(conv.name)}`;
+                    }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                      <span style={{ fontSize: 14, fontWeight: isSelected ? 700 : 600, color: "#1e293b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {conv.name}
+                      </span>
+                      <span style={{ fontSize: 11, color: "#94a3b8", flexShrink: 0 }}>
+                        {new Date(conv.lastTimestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 12, color: isSelected ? "#0068ff" : "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {conv.lastMessage}
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* 3. Khung Chat Chính (Main Chat Area) */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#ffffff" }}>
+        {/* Chat Header */}
+        <div style={{ height: 64, padding: "0 24px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff" }}>
+          {currentActiveConv ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <img
+                src={currentActiveConv.avatar}
+                alt={currentActiveConv.name}
+                style={{ width: 42, height: 42, borderRadius: "50%", objectFit: "cover" }}
+              />
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b" }}>{currentActiveConv.name}</div>
+                <div style={{ fontSize: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981" }}></span>
+                  Đang hoạt động (Sub-Client Multi-Device)
+                </div>
               </div>
             </div>
-          ))
-        )}
-      </div>
+          ) : (
+            <div style={{ fontSize: 16, fontWeight: 600, color: "#64748b" }}>Chọn cuộc trò chuyện để bắt đầu</div>
+          )}
 
-      {/* Input Form */}
-      <form onSubmit={handleSendMessage} style={{ padding: "14px 18px", borderTop: "1px solid #e5e7eb", background: "#ffffff", display: "flex", gap: 10 }}>
-        <input
-          type="text"
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          placeholder="Nhập tin nhắn Zalo..."
-          style={{ flex: 1, padding: "12px 18px", borderRadius: 24, border: "1px solid #d1d5db", outline: "none", fontSize: 14 }}
-        />
-        <button
-          type="submit"
-          style={{ padding: "0 24px", background: "#0068ff", color: "#fff", border: "none", borderRadius: 24, fontWeight: "bold", fontSize: 14, cursor: "pointer" }}
-        >
-          Gửi
-        </button>
-      </form>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button
+              onClick={handleTriggerSync}
+              style={{ padding: "7px 14px", background: "#f1f5f9", color: "#0068ff", border: "1px solid #cbd5e1", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >
+              ⚡ Đồng bộ tin nhắn
+            </button>
+            <Link
+              href="/session"
+              style={{ padding: "7px 14px", background: "#0068ff", color: "#fff", textDecoration: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}
+            >
+              🖥️ Xem Master View
+            </Link>
+          </div>
+        </div>
+
+        {/* Messages Stream View */}
+        <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc" }}>
+          {activeMessages.length === 0 ? (
+            <div style={{ margin: "auto", textAlign: "center", color: "#94a3b8" }}>
+              <div style={{ fontSize: 40, marginBottom: 10 }}>💬</div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#475569" }}>Chưa có tin nhắn trong cuộc trò chuyện này</div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>Hãy gửi tin nhắn đầu tiên bên dưới!</div>
+            </div>
+          ) : (
+            activeMessages.map((m) => (
+              <div
+                key={m.msgId}
+                style={{
+                  alignSelf: m.sender === "ME" ? "flex-end" : "flex-start",
+                  maxWidth: "65%",
+                  background: m.sender === "ME" ? "#0068ff" : "#ffffff",
+                  color: m.sender === "ME" ? "#ffffff" : "#1e293b",
+                  padding: "10px 16px",
+                  borderRadius: 16,
+                  borderBottomRightRadius: m.sender === "ME" ? 2 : 16,
+                  borderBottomLeftRadius: m.sender === "OTHER" ? 2 : 16,
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                }}
+              >
+                <div style={{ fontSize: 14, lineHeight: 1.5, wordBreak: "break-word" }}>{m.textContent}</div>
+                <div style={{ fontSize: 10, color: m.sender === "ME" ? "rgba(255,255,255,0.75)" : "#94a3b8", marginTop: 4, textAlign: "right" }}>
+                  {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {m.sender === "ME" && (m.status === "SENDING" ? "⏳" : "✓✓")}
+                </div>
+              </div>
+            ))
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Input Composer */}
+        <form onSubmit={handleSendMessage} style={{ padding: "14px 20px", borderTop: "1px solid #e5e7eb", background: "#ffffff", display: "flex", alignItems: "center", gap: 12 }}>
+          <button type="button" title="Gửi ảnh / Tệp" style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}>
+            📎
+          </button>
+          <button type="button" title="Emoji & Sticker" style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}>
+            😊
+          </button>
+          <input
+            type="text"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            placeholder={`Nhập tin nhắn gửi tới ${currentActiveConv ? currentActiveConv.name : "Zalo"}...`}
+            style={{ flex: 1, padding: "12px 18px", borderRadius: 24, border: "1px solid #d1d5db", outline: "none", fontSize: 14 }}
+          />
+          <button
+            type="submit"
+            style={{ padding: "10px 24px", background: "#0068ff", color: "#fff", border: "none", borderRadius: 24, fontWeight: "bold", fontSize: 14, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,104,255,0.3)" }}
+          >
+            Gửi
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
