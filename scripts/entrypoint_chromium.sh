@@ -12,8 +12,9 @@ done
 
 echo "🔐 Cài đặt Root CA vào Chromium NSS DB..."
 mkdir -p "$HOME/.pki/nssdb"
-certutil -d sql:$HOME/.pki/nssdb -N --empty-password || true
-certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Universal Zalo Root CA" -i "$CERT_PATH"
+touch /tmp/pwd.txt
+certutil -d sql:$HOME/.pki/nssdb -N -f /tmp/pwd.txt || true
+certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Universal Zalo Root CA" -i "$CERT_PATH" -f /tmp/pwd.txt || true
 
 echo "🌐 Bật socat port forwarder 0.0.0.0:9222 -> 127.0.0.1:9223..."
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
