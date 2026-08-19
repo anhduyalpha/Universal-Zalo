@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: universal_zalo_redis_dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data_dev:/data
+    networks:
+      - zalo_internal
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: universal_zalo_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zalo_admin
+      POSTGRES_PASSWORD: zalo_secure_password
+      POSTGRES_DB: universal_zalo
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg_data_dev:/var/lib/postgresql/data
+    networks:
+      - zalo_internal
+
+  zalo-proxy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.proxy
+    container_name: universal_zalo_proxy_dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9050:9050"
+    volumes:
+      - certs_data_dev:/app/certs
+      - storage_data_dev:/app/data
+    networks:
+      - zalo_internal
+
+  zalo-chromium:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.chromium
+    container_name: universal_zalo_chromium_dev
+    restart: unless-stopped
+    depends_on:
+      - zalo-proxy
+    ports:
+      - "0.0.0.0:9222:9222"
+    volumes:
+      - certs_data_dev:/app/certs:ro
+      - chrome_profile_dev:/app/profile
+    environment:
+      PROXY_SERVER: socks5://zalo-proxy:9050
+      TARGET_URL: https://chat.zalo.me
+    networks:
+      - zalo_internal
+
+  gateway-hub:
+    image: node:20-alpine
+    container_name: universal_zalo_gateway_dev
+    working_dir: /app
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+      - zalo-proxy
+    ports:
+      - "0.0.0.0:8080:8080"
+    volumes:
+      - ./services/gateway-hub:/app
+    command: sh -c "npm install && npm run build && node dist/index.js"
+    networks:
+      - zalo_internal
+
+  web-client:
+    image: node:20-alpine
+    container_name: universal_zalo_web_dev
+    working_dir: /app
+    restart: unless-stopped
+    depends_on:
+      - gateway-hub
+    ports:
+      - "0.0.0.0:3000:3000"
+    volumes:
+      - ./apps/web-client:/app
+      - /app/node_modules
+      - /app/.next
+    command: sh -c "npm install && npm run dev"
+    networks:
+      - zalo_internal
+
+networks:
+  zalo_internal:
+    driver: bridge
+
+volumes:
+  redis_data_dev:
+  pg_data_dev:
+  certs_data_dev:
+  storage_data_dev:
+  chrome_profile_dev:

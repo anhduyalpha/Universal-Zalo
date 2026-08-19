@@ -12,9 +12,13 @@ RUN apt-get update && apt-get install -y protobuf-compiler libssl-dev pkg-config
 COPY Cargo.toml ./
 COPY crates ./crates
 
-# Fix MSRV cho time crate và build release binaries
-RUN cargo update -p time --precise 0.3.36 || true
-RUN cargo build --release -p zalo-proxy
+# Fix MSRV cho time crate và build release binaries với BuildKit Cache
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo update -p time --precise 0.3.36 || true && \
+    cargo build --release -p zalo-proxy && \
+    cp /usr/src/app/target/release/zalo-proxy /tmp/zalo-proxy
 
 # Runtime container siêu nhẹ trên Debian Bookworm
 FROM debian:bookworm-slim
@@ -27,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/src/app/target/release/zalo-proxy /app/zalo-proxy
+COPY --from=builder /tmp/zalo-proxy /app/zalo-proxy
 
 EXPOSE 9050
 
