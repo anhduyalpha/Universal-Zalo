@@ -1,25 +1,24 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
-    container_name: universal_zalo_redis_dev
+    container_name: universal_zalo_redis
     restart: unless-stopped
     volumes:
-      - redis_data_dev:/data
+      - redis_data:/data
+    command: redis-server --appendonly yes
     networks:
       - zalo_internal
 
   postgres:
     image: postgres:16-alpine
-    container_name: universal_zalo_postgres_dev
+    container_name: universal_zalo_postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: zalo_admin
       POSTGRES_PASSWORD: zalo_secure_password
       POSTGRES_DB: universal_zalo
     volumes:
-      - pg_data_dev:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql/data
     networks:
       - zalo_internal
 
@@ -27,13 +26,13 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.proxy
-    container_name: universal_zalo_proxy_dev
+    container_name: universal_zalo_proxy
     restart: unless-stopped
     ports:
       - "127.0.0.1:9050:9050"
     volumes:
-      - certs_data_dev:/app/certs
-      - storage_data_dev:/app/data
+      - certs_data:/app/certs
+      - storage_data:/app/data
     networks:
       - zalo_internal
 
@@ -41,15 +40,15 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.chromium
-    container_name: universal_zalo_chromium_dev
+    container_name: universal_zalo_chromium
     restart: unless-stopped
     depends_on:
       - zalo-proxy
     ports:
       - "0.0.0.0:9222:9222"
     volumes:
-      - certs_data_dev:/app/certs:ro
-      - chrome_profile_dev:/app/profile
+      - certs_data:/app/certs:ro
+      - chrome_profile:/app/profile
     environment:
       PROXY_SERVER: socks5://zalo-proxy:9050
       TARGET_URL: https://chat.zalo.me
@@ -58,7 +57,7 @@ services:
 
   gateway-hub:
     image: node:20-alpine
-    container_name: universal_zalo_gateway_dev
+    container_name: universal_zalo_gateway
     working_dir: /app
     restart: unless-stopped
     depends_on:
@@ -69,13 +68,16 @@ services:
       - "0.0.0.0:8080:8080"
     volumes:
       - ./services/gateway-hub:/app
-    command: sh -c "npm install && npm run build && node dist/index.js"
+      - /app/node_modules
+      - storage_data:/app/data
+      - media_data:/app/data/media
+    command: sh -c "npm install && npm run dev"
     networks:
       - zalo_internal
 
   web-client:
     image: node:20-alpine
-    container_name: universal_zalo_web_dev
+    container_name: universal_zalo_web
     working_dir: /app
     restart: unless-stopped
     depends_on:
@@ -95,8 +97,9 @@ networks:
     driver: bridge
 
 volumes:
-  redis_data_dev:
-  pg_data_dev:
-  certs_data_dev:
-  storage_data_dev:
-  chrome_profile_dev:
+  redis_data:
+  pg_data:
+  certs_data:
+  storage_data:
+  media_data:
+  chrome_profile:
