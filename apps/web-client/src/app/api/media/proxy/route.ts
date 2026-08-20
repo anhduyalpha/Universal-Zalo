@@ -7,26 +7,44 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const targetUrl = searchParams.get("url") || "";
   const name = searchParams.get("name") || "Z";
+  const clientRange = req.headers.get("range");
+
+  const forwardHeaders: Record<string, string> = {};
+  if (clientRange) {
+    forwardHeaders["Range"] = clientRange;
+  }
 
   try {
     const res = await fetch(
       `${gatewayUrl}/api/media/proxy?url=${encodeURIComponent(targetUrl)}&name=${encodeURIComponent(name)}`,
-      { cache: "no-store" }
+      {
+        headers: forwardHeaders,
+        cache: "no-store",
+      }
     );
 
-    if (!res.ok) {
-      return new NextResponse("Error loading image", { status: res.status });
+    if (!res.ok && res.status !== 206) {
+      return new NextResponse("Error loading media", { status: res.status });
     }
 
-    const contentType = res.headers.get("Content-Type") || "image/jpeg";
-    const imageBuffer = await res.arrayBuffer();
+    const contentType = res.headers.get("Content-Type") || "application/octet-stream";
+    const contentLength = res.headers.get("Content-Length");
+    const contentRange = res.headers.get("Content-Range");
+    const acceptRanges = res.headers.get("Accept-Ranges") || "bytes";
 
-    return new NextResponse(imageBuffer, {
-      status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control": "public, max-age=31536000, immutable",
-      },
+    const responseHeaders: Record<string, string> = {
+      "Content-Type": contentType,
+      "Accept-Ranges": acceptRanges,
+      "Cache-Control": "public, max-age=31536000, immutable",
+    };
+    if (contentLength) responseHeaders["Content-Length"] = contentLength;
+    if (contentRange) responseHeaders["Content-Range"] = contentRange;
+
+    const mediaBuffer = await res.arrayBuffer();
+
+    return new NextResponse(mediaBuffer, {
+      status: res.status,
+      headers: responseHeaders,
     });
   } catch (e: any) {
     return new NextResponse(`Media proxy error: ${e.message}`, { status: 500 });
