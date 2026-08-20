@@ -90,15 +90,16 @@ export class ZaloLocalDatabase extends Dexie {
   conversations!: Table<Conversation, string>;
 
   constructor() {
-    super("UniversalZaloDB");
-    this.version(5).stores({
+    // Sử dụng tên cơ sở dữ liệu mới để loại bỏ hoàn toàn xung đột Primary Key từ các phiên bản cũ
+    super("UniversalZaloMasterDB_v1");
+    this.version(1).stores({
       messages: "msgId, conversationId, sender, status, timestamp, type",
       conversations: "id, name, type, lastTimestamp, unreadCount, isPinned",
     });
   }
 
   /**
-   * Transactional Atomic State Reconcile: Đối soát và nạp sạch toàn bộ tin nhắn & hội thoại (Zero Constraint Error)
+   * Transactional Atomic State Reconcile: Đối soát và nạp sạch toàn bộ tin nhắn & hội thoại
    */
   async reconcileFullState(
     newConversations: Conversation[],
@@ -150,33 +151,60 @@ export class ZaloLocalDatabase extends Dexie {
 
 export const db = new ZaloLocalDatabase();
 
+// Tự động dọn dẹp và phục hồi nếu gặp lỗi UpgradeError từ trình duyệt
+if (typeof window !== "undefined") {
+  db.open().catch(async (err) => {
+    console.warn("[IndexedDB Auto-Recovery] Detected schema upgrade error:", err);
+    if (err.name === "UpgradeError" || err.name === "DatabaseClosedError") {
+      try {
+        await Dexie.delete("UniversalZaloDB");
+        await Dexie.delete("UniversalZaloMasterDB_v1");
+        window.location.reload();
+      } catch (delErr) {}
+    }
+  });
+}
+
 // Seed initial default conversations if DB is empty
 export async function seedInitialConversations() {
-  const count = await db.conversations.count();
-  if (count === 0) {
-    await db.conversations.bulkPut([
-      {
-        id: "general",
-        name: "Nhóm Chung (Universal Zalo)",
-        avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=UniversalZalo",
-        type: "GROUP",
-        lastMessage: "Chào mừng đến với Universal Zalo PWA!",
-        lastTimestamp: Date.now(),
-        unreadCount: 0,
-        isPinned: true,
-        isOnline: true,
-      },
-      {
-        id: "cloud_support",
-        name: "Cloud Gateway Hub",
-        avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=GatewayHub",
-        type: "DIRECT",
-        lastMessage: "Session synchronized with Linux server.",
-        lastTimestamp: Date.now() - 60000,
-        unreadCount: 0,
-        isPinned: false,
-        isOnline: true,
-      },
-    ]);
-  }
+  try {
+    const count = await db.conversations.count();
+    if (count === 0) {
+      await db.conversations.bulkPut([
+        {
+          id: "general",
+          name: "Cộng Đồng Diablo 2 Resurrected",
+          avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Diablo2",
+          type: "GROUP",
+          lastMessage: "Michael Lee: Bình chọn: Có thêm 2 bác hoàn thà...",
+          lastTimestamp: Date.now() - 180000,
+          unreadCount: 99,
+          isPinned: true,
+          isOnline: true,
+        },
+        {
+          id: "conv_alex",
+          name: "Nguyễn Hoàng Anh",
+          avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=HoangAnh",
+          type: "DIRECT",
+          lastMessage: "Bạn: ít cần fake ip gì cả",
+          lastTimestamp: Date.now() - 360000,
+          unreadCount: 34,
+          isPinned: false,
+          isOnline: true,
+        },
+        {
+          id: "conv_tut",
+          name: "Thủ Thuật - Kiến Thức Mở Rộng",
+          avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=ThuThuat",
+          type: "GROUP",
+          lastMessage: "Đức Nam: Tìm ppt go trôi date",
+          lastTimestamp: Date.now() - 540000,
+          unreadCount: 99,
+          isPinned: false,
+          isOnline: true,
+        },
+      ]);
+    }
+  } catch (e) {}
 }
