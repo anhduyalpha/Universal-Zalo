@@ -506,6 +506,37 @@ export default function ZChatDeskApp() {
             }, 1500);
           }
 
+          if (data.event === "CDC_EVENT") {
+            if (data.table === "messages" && data.data) {
+              const msg = data.data;
+              try {
+                await db.messages.put({
+                  msgId: msg.msgId,
+                  conversationId: msg.conversationId,
+                  textContent: msg.textContent,
+                  sender: msg.sender,
+                  status: msg.status || "DELIVERED",
+                  timestamp: msg.timestamp || Date.now(),
+                  type: msg.type || "TEXT",
+                  mediaUrl: msg.mediaUrl,
+                  mediaName: msg.mediaName,
+                  mediaSize: msg.mediaSize,
+                  reactions: msg.reactions,
+                  mentions: msg.mentions,
+                });
+                await db.conversations.update(msg.conversationId, {
+                  lastMessage: msg.textContent || `[${msg.type || "Media"}]`,
+                  lastTimestamp: msg.timestamp || Date.now(),
+                });
+              } catch {}
+            } else if (data.table === "conversations" && data.data) {
+              const conv = data.data;
+              try {
+                await db.conversations.put(conv);
+              } catch {}
+            }
+          }
+
           if (data.event === "MESSAGE_FANOUT") {
             const convId = data.conversationId || activeConvId || "general";
             try {

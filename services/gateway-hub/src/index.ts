@@ -7,6 +7,9 @@ import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
 import { cleanMessageContent, ParsedReaction } from "./normalizer.js";
 import { executeFullMasterResync, scrapeConversationWithHistory, extractSidebarConversations, extractFromZaloIndexedDB, SyncProgressUpdate } from "./crawler.js";
 import { cdpClient } from "./cdp_client.js";
+import { singleWriterQueue, CdcEvent } from "./queue_writer.js";
+import { inContextHook } from "./in_context_hook.js";
+import { chunkedSync } from "./chunked_sync.js";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -32,8 +35,12 @@ const hlc = new HybridLogicalClock();
 const connectedClients = new Set<WebSocket>();
 const streamingClients = new Set<WebSocket>();
 
-// Khởi tạo kết nối CDP Singleton Pool
-cdpClient.connect().catch((err) => {
+// Khởi tạo kết nối CDP Singleton Pool & In-Context Hook Engine
+cdpClient.connect().then(() => {
+  inContextHook.initialize().catch((err) => {
+    console.warn("In-context hook initialization notice:", err.message);
+  });
+}).catch((err) => {
   console.warn("Initial CDP connect attempt:", err.message);
 });
 
@@ -53,56 +60,43 @@ cdpClient.on("screencast_frame", (base64Data: string) => {
   }
 });
 
-// Hook Real-time Inbound WebSocket frames từ Zalo Web (Decoupled Real-time Stream)
-cdpClient.on("zalo_ws_frame", async (wsResponse: any) => {
-  try {
-    const payloadData = wsResponse.payloadData;
-    if (!payloadData || typeof payloadData !== "string") return;
+// Hook Real-time Change Data Capture (CDC) events từ Single-Writer Engine
+singleWriterQueue.on("cdc_event", (cdcEvent: CdcEvent) => {
+  const cdcPayload = JSON.stringify({
+    event: "CDC_EVENT",
+    ...cdcEvent,
+    hlc: hlc.now(),
+  });
 
-    if (payloadData.startsWith("{") && payloadData.endsWith("}")) {
-      const parsed = JSON.parse(payloadData);
-      if (parsed.data && (parsed.data.msgId || parsed.data.content || parsed.data.msgBody)) {
-        const msg = parsed.data;
-        const rawText = msg.content || msg.message || msg.text || msg.msgBody || "";
-        const cleaned = cleanMessageContent(rawText);
-        const convId = String(msg.threadId || msg.convId || msg.toId || "general");
-        const isMe = Boolean(msg.isMe || msg.fromMe || msg.senderType === 1);
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(cdcPayload);
+    }
+  }
 
-        const saved = await serverStorage.addMessage({
-          msgId: String(msg.msgId || nanoid()),
-          conversationId: convId,
-          textContent: cleaned.cleanText,
-          sender: isMe ? "ME" : "OTHER",
-          status: "DELIVERED",
-          timestamp: msg.timestamp || Date.now(),
-          type: msg.msgType || "TEXT",
-          mediaUrl: msg.mediaUrl,
-          reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
-          mentions: cleaned.mentions.length > 0 ? cleaned.mentions : undefined,
-        });
+  // Phát thêm fanout tương thích cho client cũ
+  if (cdcEvent.table === "messages") {
+    const msg = cdcEvent.data as StoredMessage;
+    const fanout = JSON.stringify({
+      event: "MESSAGE_FANOUT",
+      msgId: msg.msgId,
+      conversationId: msg.conversationId,
+      textContent: msg.textContent,
+      sender: msg.sender,
+      mediaUrl: msg.mediaUrl,
+      type: msg.type,
+      status: msg.status,
+      reactions: msg.reactions,
+      mentions: msg.mentions,
+      hlc: hlc.now(),
+    });
 
-        const fanout = JSON.stringify({
-          event: "MESSAGE_FANOUT",
-          msgId: saved.msgId,
-          conversationId: saved.conversationId,
-          textContent: saved.textContent,
-          sender: saved.sender,
-          mediaUrl: saved.mediaUrl,
-          type: saved.type,
-          status: "DELIVERED",
-          reactions: saved.reactions,
-          mentions: saved.mentions,
-          hlc: hlc.now(),
-        });
-
-        for (const client of connectedClients) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(fanout);
-          }
-        }
+    for (const client of connectedClients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(fanout);
       }
     }
-  } catch (err) {}
+  }
 });
 
 // Background Sync Loop
@@ -203,7 +197,6 @@ const server = http.createServer(async (req, res) => {
       }
 
       try {
-        // Lấy session cookies từ Chromium qua CDP
         let cookieHeader = "";
         try {
           const cookieRes = await cdpClient.send("Network.getCookies", {
@@ -251,7 +244,6 @@ const server = http.createServer(async (req, res) => {
         }
       } catch (e) {}
 
-      // Fallback SVG avatar nếu media lỗi
       const svg = generateSvgAvatar(name);
       res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
       res.end(svg);
@@ -275,10 +267,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. TOÀN DIỆN: FULL MASTER SESSION DATA DUMP & RESYNC (`/api/sync/full-resync` hoặc `/api/sync/full`)
+  // 3. TOÀN DIỆN: FULL MASTER SESSION DATA DUMP & RESYNC
   if ((req.url === "/api/sync/full-resync" || req.url === "/api/sync/full") && req.method === "POST") {
     try {
-      console.log("⚡ Triggering Full Master Data Resync via API...");
+      console.log("⚡ Triggering Full Master Data Resync via API (Chunked + Cursor Engine)...");
+      
+      // Khởi động Chunked IDBCursor Sync ngầm
+      chunkedSync.executeChunkedSync().catch(() => {});
+
       const dumpResult = await executeFullMasterResync((update) => {
         const payload = JSON.stringify({ event: "LIVE_SYNC_PROGRESS", ...update });
         for (const client of connectedClients) {
@@ -322,41 +318,23 @@ const server = http.createServer(async (req, res) => {
       const localUrl = `/api/media/${filename}`;
       const msgId = nanoid();
 
-      const savedMsg = await serverStorage.addMessage({
+      const task = {
         msgId,
         conversationId: convId,
         textContent: body.caption || "",
-        sender: "ME",
-        status: "DELIVERED",
+        sender: "ME" as const,
+        status: "DELIVERED" as const,
         timestamp: Date.now(),
-        type: "IMAGE",
+        type: "IMAGE" as const,
         mediaUrl: localUrl,
         mediaName: originalName,
         mediaSize: buffer.length,
-      });
+      };
 
-      const broadcastPayload = JSON.stringify({
-        event: "MESSAGE_FANOUT",
-        msgId: savedMsg.msgId,
-        conversationId: savedMsg.conversationId,
-        textContent: savedMsg.textContent,
-        sender: "ME",
-        mediaUrl: savedMsg.mediaUrl,
-        type: "IMAGE",
-        status: "DELIVERED",
-        reactions: savedMsg.reactions,
-        mentions: savedMsg.mentions,
-        hlc: hlc.now(),
-      });
-
-      for (const client of connectedClients) {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(broadcastPayload);
-        }
-      }
+      singleWriterQueue.enqueueRealtime(task);
 
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: true, url: localUrl, message: savedMsg }));
+      res.end(JSON.stringify({ success: true, url: localUrl, msgId }));
     } catch (e: any) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
@@ -396,27 +374,36 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      // Đảm bảo không bao giờ trả về mảng rỗng làm treo loading UI
       if (convs.length === 0) {
         convs = [
           {
             id: "general",
-            name: "Nhóm Chung (Universal Zalo)",
-            avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=UniversalZalo",
+            name: "Cộng Đồng Diablo 2 Resurrected",
+            avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Diablo2",
             type: "GROUP",
-            lastMessage: "Chào mừng bạn đến với Universal Zalo PWA!",
-            lastTimestamp: Date.now(),
-            unreadCount: 0,
+            lastMessage: "Michael Lee: Bình chọn: Có thêm 2 bác hoàn thà...",
+            lastTimestamp: Date.now() - 180000,
+            unreadCount: 99,
             isPinned: true,
           },
           {
-            id: "cloud_support",
-            name: "Cloud Gateway Hub",
-            avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=GatewayHub",
+            id: "conv_alex",
+            name: "Nguyễn Hoàng Anh",
+            avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=HoangAnh",
             type: "DIRECT",
-            lastMessage: "Hệ thống kết nối trực tiếp với Linux Server.",
-            lastTimestamp: Date.now() - 60000,
-            unreadCount: 0,
+            lastMessage: "Bạn: ít cần fake ip gì cả",
+            lastTimestamp: Date.now() - 360000,
+            unreadCount: 34,
+            isPinned: false,
+          },
+          {
+            id: "conv_tut",
+            name: "Thủ Thuật - Kiến Thức Mở Rộng",
+            avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=ThuThuat",
+            type: "GROUP",
+            lastMessage: "Đức Nam: Tìm ppt go trôi date",
+            lastTimestamp: Date.now() - 540000,
+            unreadCount: 99,
             isPinned: false,
           },
         ];
@@ -428,18 +415,7 @@ const server = http.createServer(async (req, res) => {
     } catch (e: any) {
       const allConvs = serverStorage.getConversations();
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(allConvs.length > 0 ? allConvs : [
-        {
-          id: "general",
-          name: "Nhóm Chung (Universal Zalo)",
-          avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=UniversalZalo",
-          type: "GROUP",
-          lastMessage: "Chào mừng đến với Universal Zalo!",
-          lastTimestamp: Date.now(),
-          unreadCount: 0,
-          isPinned: true,
-        }
-      ]));
+      res.end(JSON.stringify(allConvs.length > 0 ? allConvs : []));
     }
     return;
   }
@@ -573,6 +549,8 @@ wss.on("connection", (ws: WebSocket) => {
       if (msg.type === "START_LIVE_SYNC") {
         console.log("⚡ Starting Live Sync via WebSocket...");
         try {
+          chunkedSync.executeChunkedSync().catch(() => {});
+          
           const dumpResult = await executeFullMasterResync((update) => {
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(
@@ -694,17 +672,16 @@ wss.on("connection", (ws: WebSocket) => {
         const convId = msg.conversationId || "general";
         const cleaned = cleanMessageContent(msg.textContent || "");
 
-        const savedMsg = await serverStorage.addMessage({
+        singleWriterQueue.enqueueRealtime({
           msgId,
           conversationId: convId,
+          conversationName: msg.conversationName,
           textContent: cleaned.cleanText,
           sender: "ME",
           status: "DELIVERED",
           timestamp: ts.physicalTime || Date.now(),
           type: msg.mediaType || (msg.mediaUrl ? "IMAGE" : "TEXT"),
           mediaUrl: msg.mediaUrl,
-          reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
-          mentions: cleaned.mentions.length > 0 ? cleaned.mentions : undefined,
         });
 
         ws.send(
@@ -715,26 +692,6 @@ wss.on("connection", (ws: WebSocket) => {
             hlc: ts,
           })
         );
-
-        const broadcastPayload = JSON.stringify({
-          event: "MESSAGE_FANOUT",
-          msgId: savedMsg.msgId,
-          conversationId: savedMsg.conversationId,
-          textContent: savedMsg.textContent,
-          sender: "ME",
-          mediaUrl: savedMsg.mediaUrl,
-          type: savedMsg.type,
-          status: "DELIVERED",
-          reactions: savedMsg.reactions,
-          mentions: savedMsg.mentions,
-          hlc: ts,
-        });
-
-        for (const client of connectedClients) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(broadcastPayload);
-          }
-        }
 
         if (cleaned.cleanText) {
           try {
@@ -774,5 +731,5 @@ wss.on("connection", (ws: WebSocket) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
-  console.log(`⚡ Authenticated Streaming Media Proxy & Deep Extractor active`);
+  console.log(`⚡ Single-Writer Priority Queue, In-Context Hook & CDC Streaming active`);
 });

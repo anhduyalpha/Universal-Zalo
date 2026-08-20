@@ -162,6 +162,11 @@ export class CdpSessionClient extends EventEmitter {
             if (resp.method === "Network.webSocketFrameReceived" && resp.params?.response) {
               this.emit("zalo_ws_frame", resp.params.response);
             }
+
+            // Handle Runtime Native Binding Call
+            if (resp.method === "Runtime.bindingCalled" && resp.params) {
+              this.emit("binding_called", resp.params);
+            }
           }
         } catch (err) {
           console.warn("[CDP Client] Error parsing incoming frame:", err);
