@@ -19,7 +19,7 @@ export interface SanitizedMessageResult {
   mentions: MentionToken[];
 }
 
-// Bảng ánh xạ mã reaction/emoticon di sản của Zalo sang emoji & kiểu chuẩn (Không trùng lặp key)
+// Bảng ánh xạ mã reaction/emoticon di sản của Zalo sang emoji & kiểu chuẩn
 export const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: string }> = {
   "/-strong": { type: "like", emoji: "👍" },
   "(y)": { type: "like", emoji: "👍" },
@@ -32,9 +32,11 @@ export const ZALO_LEGACY_TOKEN_MAP: Record<string, { type: ReactionType; emoji: 
   ":-bd": { type: "haha", emoji: "😆" },
   ":-D": { type: "haha", emoji: "😄" },
   ":D": { type: "haha", emoji: "😄" },
-  ":>:o:-(": { type: "cry", emoji: "😭" },
   ":>:o:-(( ": { type: "cry", emoji: "😭" },
+  ":>:o:-((": { type: "cry", emoji: "😭" },
+  ":>:o:-(": { type: "cry", emoji: "😭" },
   ":-(( ": { type: "cry", emoji: "😭" },
+  ":-((": { type: "cry", emoji: "😭" },
   ":-(": { type: "cry", emoji: "😢" },
   ":(": { type: "cry", emoji: "😢" },
   ":-<": { type: "angry", emoji: "😡" },
@@ -80,14 +82,21 @@ const INLINE_EMOTICON_MAP: Record<string, string> = {
   "<3": "❤️",
 };
 
-// Regex nhận diện các cụm token reaction dính vào đuôi hoặc rác nối tiếp
-const TRAILING_REACTION_REGEX = /(?:\/-(?:strong|heart|fade|break|rose)|:>:o:-\(\(|:[-<()DOPSbdh*?pP]|;[-)]|\([yL]\))+$/;
-const GLOBAL_REACTION_TOKEN_REGEX = /(?:\/-(?:strong|heart|fade|break|rose)|:>:o:-\(\(|:[-<()DOPSbdh*?pP]|;[-)]|\([yL]\))/g;
+// Tạo Dynamic Regex chuẩn xác 100% từ danh sách tokens (sắp xếp theo độ dài giảm dần)
+const SORTED_LEGACY_TOKENS = Object.keys(ZALO_LEGACY_TOKEN_MAP)
+  .map((t) => t.trim())
+  .filter(Boolean)
+  .sort((a, b) => b.length - a.length)
+  .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+
+const TOKEN_UNION_PATTERN = SORTED_LEGACY_TOKENS.join("|");
+const TRAILING_REACTION_REGEX = new RegExp(`(?:${TOKEN_UNION_PATTERN})+\\s*$`);
+const GLOBAL_REACTION_TOKEN_REGEX = new RegExp(TOKEN_UNION_PATTERN, "g");
 
 // Regex bảo vệ URL để không bị băm cắt link web, TikTok, Youtube
 const URL_REGEX = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
 
-// Regex phát hiện @mention (ví dụ: @Duy, @Nguyen Van A)
+// Regex phát hiện @mention
 const MENTION_REGEX = /@([\p{L}\p{N}_\-\.\s]{2,30})(?=\s|$|[,\.\?!])/gu;
 
 /**
@@ -117,13 +126,14 @@ export function cleanMessageContent(rawText: string): SanitizedMessageResult {
     const matchedSegment = trailingMatch[0];
     const tokens = matchedSegment.match(GLOBAL_REACTION_TOKEN_REGEX) || [];
     for (const token of tokens) {
-      const info = ZALO_LEGACY_TOKEN_MAP[token] || { type: "other", emoji: "✨" };
+      const cleanToken = token.trim();
+      const info = ZALO_LEGACY_TOKEN_MAP[cleanToken] || ZALO_LEGACY_TOKEN_MAP[token] || { type: "other", emoji: "✨" };
       const key = `${info.type}_${info.emoji}`;
       if (reactionsMap.has(key)) {
         reactionsMap.get(key)!.count += 1;
       } else {
         reactionsMap.set(key, {
-          code: token,
+          code: cleanToken,
           type: info.type,
           emoji: info.emoji,
           count: 1,

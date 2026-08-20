@@ -6,12 +6,13 @@ import { nanoid } from "nanoid";
 import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
 import { cleanMessageContent, ParsedReaction } from "./normalizer.js";
 import { executeFullMasterResync, scrapeConversationWithHistory, extractSidebarConversations, SyncProgressUpdate } from "./crawler.js";
+import { cdpClient } from "./cdp_client.js";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
 interface ClientMessage {
-  type: "SEND_MESSAGE" | "PING" | "CLICK" | "TYPE" | "WHEEL" | "START_STREAM" | "SELECT_CONVERSATION" | "START_LIVE_SYNC";
+  type: "SEND_MESSAGE" | "PING" | "CLICK" | "TYPE" | "WHEEL" | "START_STREAM" | "STOP_STREAM" | "SELECT_CONVERSATION" | "START_LIVE_SYNC";
   conversationId?: string;
   conversationName?: string;
   textContent?: string;
@@ -31,216 +32,92 @@ const hlc = new HybridLogicalClock();
 const connectedClients = new Set<WebSocket>();
 const streamingClients = new Set<WebSocket>();
 
-function getCdpJson(host: string, port: number, path: string): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        hostname: host,
-        port: port,
-        path: path,
-        method: "GET",
-        headers: {
-          Host: `localhost:${port}`,
-        },
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            try {
-              resolve(JSON.parse(data));
-            } catch (e) {
-              reject(new Error(`Invalid JSON from CDP: ${data}`));
-            }
-          } else {
-            reject(new Error(`CDP HTTP ${res.statusCode}: ${data}`));
-          }
-        });
-      }
-    );
-    req.on("error", reject);
-    req.setTimeout(4000, () => {
-      req.destroy(new Error("CDP request timed out"));
-    });
-    req.end();
+// Khởi tạo kết nối CDP Singleton Pool
+cdpClient.connect().catch((err) => {
+  console.warn("Initial CDP connect attempt:", err.message);
+});
+
+// Hook Screencast frames trực tiếp từ Singleton CDP Client
+cdpClient.on("screencast_frame", (base64Data: string) => {
+  if (streamingClients.size === 0) return;
+  const framePayload = JSON.stringify({
+    event: "SCREENCAST_FRAME",
+    data: base64Data,
+    timestamp: Date.now(),
   });
-}
 
-export async function sendCdpCommand(method: string, params: any = {}): Promise<any> {
-  const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
-  const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
-  const cdpPort = parseInt(cdpPortStr || "9222", 10);
-
-  const targets = await getCdpJson(cdpHost, cdpPort, "/json");
-  const pageTarget = targets.find((t: any) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
-
-  if (!pageTarget || !pageTarget.webSocketDebuggerUrl) {
-    throw new Error("Không tìm thấy active page target trong Chromium");
+  for (const client of streamingClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(framePayload);
+    }
   }
+});
 
-  let wsUrl = pageTarget.webSocketDebuggerUrl as string;
-  wsUrl = wsUrl.replace(/^ws:\/\/[^/]+/, `ws://${cdpHost}:${cdpPort}`);
-
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl, {
-      headers: { Host: `localhost:${cdpPort}` },
-    });
-
-    const timeout = setTimeout(() => {
-      try { ws.close(); } catch {}
-      reject(new Error(`CDP ${method} timed out`));
-    }, 10000);
-
-    const cmdId = Math.floor(Math.random() * 100000);
-
-    ws.on("open", () => {
-      ws.send(
-        JSON.stringify({
-          id: 1,
-          method: "Emulation.setDeviceMetricsOverride",
-          params: {
-            width: 1440,
-            height: 900,
-            deviceScaleFactor: 1,
-            mobile: false,
-          },
-        })
-      );
-
-      ws.send(
-        JSON.stringify({
-          id: cmdId,
-          method: method,
-          params: params,
-        })
-      );
-    });
-
-    ws.on("message", (raw) => {
-      try {
-        const resp = JSON.parse(raw.toString());
-        if (resp.id === cmdId) {
-          clearTimeout(timeout);
-          try { ws.close(); } catch {}
-          resolve(resp.result);
-        }
-      } catch (e) {
-        clearTimeout(timeout);
-        try { ws.close(); } catch {}
-        reject(e);
-      }
-    });
-
-    ws.on("error", (err) => {
-      clearTimeout(timeout);
-      reject(err);
-    });
-  });
-}
-
-let screencastWs: WebSocket | null = null;
-
-async function ensureScreencastStream() {
-  if (screencastWs && screencastWs.readyState === WebSocket.OPEN) return;
-
+// Hook Real-time Inbound WebSocket frames từ Zalo Web (Decoupled Real-time Stream)
+cdpClient.on("zalo_ws_frame", async (wsResponse: any) => {
   try {
-    const cdpHostStr = process.env.CHROMIUM_CDP_HOST || "zalo-chromium:9222";
-    const [cdpHost, cdpPortStr] = cdpHostStr.split(":");
-    const cdpPort = parseInt(cdpPortStr || "9222", 10);
+    const payloadData = wsResponse.payloadData;
+    if (!payloadData || typeof payloadData !== "string") return;
 
-    const targets = await getCdpJson(cdpHost, cdpPort, "/json");
-    const pageTarget = targets.find((t: any) => t.type === "page" && t.webSocketDebuggerUrl) || targets[0];
+    // Nếu frame chứa payload JSON dạng tin nhắn mới
+    if (payloadData.startsWith("{") && payloadData.endsWith("}")) {
+      const parsed = JSON.parse(payloadData);
+      if (parsed.data && (parsed.data.msgId || parsed.data.content || parsed.data.msgBody)) {
+        const msg = parsed.data;
+        const rawText = msg.content || msg.message || msg.text || msg.msgBody || "";
+        const cleaned = cleanMessageContent(rawText);
+        const convId = String(msg.threadId || msg.convId || msg.toId || "general");
+        const isMe = Boolean(msg.isMe || msg.fromMe || msg.senderType === 1);
 
-    if (!pageTarget || !pageTarget.webSocketDebuggerUrl) return;
+        const saved = await serverStorage.addMessage({
+          msgId: String(msg.msgId || nanoid()),
+          conversationId: convId,
+          textContent: cleaned.cleanText,
+          sender: isMe ? "ME" : "OTHER",
+          status: "DELIVERED",
+          timestamp: msg.timestamp || Date.now(),
+          type: msg.msgType || "TEXT",
+          mediaUrl: msg.mediaUrl,
+          reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
+          mentions: cleaned.mentions.length > 0 ? cleaned.mentions : undefined,
+        });
 
-    let wsUrl = pageTarget.webSocketDebuggerUrl as string;
-    wsUrl = wsUrl.replace(/^ws:\/\/[^/]+/, `ws://${cdpHost}:${cdpPort}`);
+        const fanout = JSON.stringify({
+          event: "MESSAGE_FANOUT",
+          msgId: saved.msgId,
+          conversationId: saved.conversationId,
+          textContent: saved.textContent,
+          sender: saved.sender,
+          mediaUrl: saved.mediaUrl,
+          type: saved.type,
+          status: "DELIVERED",
+          reactions: saved.reactions,
+          mentions: saved.mentions,
+          hlc: hlc.now(),
+        });
 
-    screencastWs = new WebSocket(wsUrl, {
-      headers: { Host: `localhost:${cdpPort}` },
-    });
-
-    screencastWs.on("open", () => {
-      screencastWs?.send(
-        JSON.stringify({
-          id: 10,
-          method: "Emulation.setDeviceMetricsOverride",
-          params: { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
-        })
-      );
-
-      screencastWs?.send(
-        JSON.stringify({
-          id: 11,
-          method: "Page.startScreencast",
-          params: {
-            format: "jpeg",
-            quality: 85,
-            maxWidth: 1440,
-            maxHeight: 900,
-            everyNthFrame: 1,
-          },
-        })
-      );
-    });
-
-    screencastWs.on("message", (raw) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-        if (msg.method === "Page.screencastFrame" && msg.params?.data) {
-          const sessionId = msg.params.sessionId;
-
-          screencastWs?.send(
-            JSON.stringify({
-              id: 12,
-              method: "Page.screencastFrameAck",
-              params: { sessionId },
-            })
-          );
-
-          const framePayload = JSON.stringify({
-            event: "SCREENCAST_FRAME",
-            data: msg.params.data,
-            timestamp: Date.now(),
-          });
-
-          for (const client of streamingClients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(framePayload);
-            }
+        for (const client of connectedClients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(fanout);
           }
         }
-      } catch (e) {}
-    });
-
-    screencastWs.on("close", () => {
-      screencastWs = null;
-      if (streamingClients.size > 0) {
-        setTimeout(ensureScreencastStream, 1000);
       }
-    });
+    }
+  } catch (err) {}
+});
 
-    screencastWs.on("error", () => {
-      screencastWs = null;
-    });
-  } catch (e) {
-    screencastWs = null;
-  }
-}
-
-// Background Ingestion Loop tự động cập nhật tin nhắn định kỳ
+// Background Sync Loop
 async function runBackgroundMessageIngestion() {
   try {
     const convs = serverStorage.getConversations();
     if (convs.length > 0) {
       const activeConv = convs[0];
-      await scrapeConversationWithHistory(sendCdpCommand, activeConv.id, activeConv.name, 1);
+      await scrapeConversationWithHistory(activeConv.id, activeConv.name, 1);
     }
   } catch (e) {}
 }
 
-setInterval(runBackgroundMessageIngestion, 12000);
+setInterval(runBackgroundMessageIngestion, 15000);
 
 function parseBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -287,7 +164,7 @@ const server = http.createServer(async (req, res) => {
   // 1. Screenshot Endpoint (`/qr` hoặc `/api/qr`)
   if (req.url?.startsWith("/qr") || req.url?.startsWith("/api/qr")) {
     try {
-      const result = await sendCdpCommand("Page.captureScreenshot", {
+      const result = await cdpClient.send("Page.captureScreenshot", {
         format: "png",
         quality: 90,
         captureBeyondViewport: false,
@@ -312,7 +189,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. Phục vụ File Media đã lưu vĩnh viễn trên Server Volume (`/api/media/*` hoặc `/media/*`)
+  // 2. Phục vụ File Media & Avatar Proxy (`/api/media/*` hoặc `/media/*`)
   if (req.url?.startsWith("/api/media/") || req.url?.startsWith("/media/")) {
     if (req.url.startsWith("/api/media/proxy") || req.url.startsWith("/media/proxy")) {
       const urlObj = new URL(req.url, `http://localhost:${PORT}`);
@@ -374,7 +251,7 @@ const server = http.createServer(async (req, res) => {
   if ((req.url === "/api/sync/full-resync" || req.url === "/api/sync/full") && req.method === "POST") {
     try {
       console.log("⚡ Triggering Full Master Data Resync via API...");
-      const dumpResult = await executeFullMasterResync(sendCdpCommand, (update) => {
+      const dumpResult = await executeFullMasterResync((update) => {
         const payload = JSON.stringify({ event: "LIVE_SYNC_PROGRESS", ...update });
         for (const client of connectedClients) {
           if (client.readyState === WebSocket.OPEN) {
@@ -470,7 +347,7 @@ const server = http.createServer(async (req, res) => {
 
     if (convId && (msgs.length === 0 || urlObj.searchParams.get("refresh") === "true")) {
       if (convName) {
-        msgs = await scrapeConversationWithHistory(sendCdpCommand, convId, convName, 2);
+        msgs = await scrapeConversationWithHistory(convId, convName, 2);
       }
     }
 
@@ -479,10 +356,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 6. Trích xuất danh sách hội thoại từ Zalo Web (`/api/conversations`)
+  // 6. Trích xuất danh sách hội thoại (`/api/conversations`)
   if (req.url === "/api/conversations" || req.url === "/conversations") {
     try {
-      const convs = await extractSidebarConversations(sendCdpCommand);
+      const convs = await extractSidebarConversations();
       if (convs.length > 0) {
         serverStorage.saveConversations(convs);
       }
@@ -498,14 +375,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 7. Endpoint Click Chuột (`/api/action/click`)
+  // 7. Action Endpoints (Click, Wheel, Type)
   if (req.url === "/api/action/click" && req.method === "POST") {
     try {
       const body = await parseBody(req);
       const x = Math.round(Number(body.x) || 0);
       const y = Math.round(Number(body.y) || 0);
 
-      await sendCdpCommand("Input.dispatchMouseEvent", {
+      await cdpClient.send("Input.dispatchMouseEvent", {
         type: "mousePressed",
         button: "left",
         clickCount: 1,
@@ -513,7 +390,7 @@ const server = http.createServer(async (req, res) => {
         y: y,
       });
 
-      await sendCdpCommand("Input.dispatchMouseEvent", {
+      await cdpClient.send("Input.dispatchMouseEvent", {
         type: "mouseReleased",
         button: "left",
         clickCount: 1,
@@ -530,7 +407,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 8. Endpoint Cuộn Chuột (`/api/action/wheel`)
   if (req.url === "/api/action/wheel" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -539,7 +415,7 @@ const server = http.createServer(async (req, res) => {
       const deltaX = Number(body.deltaX) || 0;
       const deltaY = Number(body.deltaY) || 0;
 
-      await sendCdpCommand("Input.dispatchMouseEvent", {
+      await cdpClient.send("Input.dispatchMouseEvent", {
         type: "mouseWheel",
         x: x,
         y: y,
@@ -556,7 +432,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 9. Endpoint Gõ văn bản (`/api/action/type`)
   if (req.url === "/api/action/type" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -564,10 +439,10 @@ const server = http.createServer(async (req, res) => {
       const pressEnter = Boolean(body.pressEnter !== false);
 
       if (text) {
-        await sendCdpCommand("Input.insertText", { text: text });
+        await cdpClient.send("Input.insertText", { text: text });
 
         if (pressEnter) {
-          await sendCdpCommand("Input.dispatchKeyEvent", {
+          await cdpClient.send("Input.dispatchKeyEvent", {
             type: "rawKeyDown",
             key: "Enter",
             code: "Enter",
@@ -576,7 +451,7 @@ const server = http.createServer(async (req, res) => {
             unmodifiedText: "\r",
             text: "\r",
           });
-          await sendCdpCommand("Input.dispatchKeyEvent", {
+          await cdpClient.send("Input.dispatchKeyEvent", {
             type: "keyUp",
             key: "Enter",
             code: "Enter",
@@ -595,67 +470,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 10. Endpoint kích hoạt Đồng bộ tin nhắn (`/api/sync`)
-  if (req.url === "/api/sync" || req.url === "/sync") {
-    try {
-      const script = `
-        (() => {
-          const syncBtn = Array.from(document.querySelectorAll('a, button, span, div')).find(
-            el => el.textContent && (el.textContent.includes('Nhấn để đồng bộ ngay') || el.textContent.includes('đồng bộ ngay') || el.textContent.includes('Đồng bộ tin nhắn') || el.textContent.includes('Thử lại'))
-          );
-          if (syncBtn) {
-            syncBtn.click();
-            return { success: true, message: "Đã click nút Đồng bộ / Thử lại trên Zalo Web." };
-          }
-          return { success: false, message: "Không tìm thấy nút đồng bộ." };
-        })()
-      `;
-      const result = await sendCdpCommand("Runtime.evaluate", {
-        expression: script,
-        returnByValue: true,
-        awaitPromise: true,
-      });
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result?.result?.value || { success: false }));
-    } catch (e: any) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: false, message: e.message }));
-    }
-    return;
-  }
-
-  // 11. Endpoint Bấm Hủy / Đóng Modal lỗi đồng bộ (`/api/dismiss-modal`)
-  if (req.url === "/api/dismiss-modal" || req.url === "/dismiss-modal") {
-    try {
-      const script = `
-        (() => {
-          const cancelBtn = Array.from(document.querySelectorAll('a, button, span, div')).find(
-            el => el.textContent && (el.textContent.trim() === 'Hủy' || el.textContent.trim() === 'Đóng' || el.textContent.includes('Bỏ qua'))
-          );
-          if (cancelBtn) {
-            cancelBtn.click();
-            return { success: true, message: "Đã bấm Hủy popup đồng bộ." };
-          }
-          return { success: false, message: "Không tìm thấy nút Hủy." };
-        })()
-      `;
-      const result = await sendCdpCommand("Runtime.evaluate", {
-        expression: script,
-        returnByValue: true,
-        awaitPromise: true,
-      });
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result?.result?.value || { success: false }));
-    } catch (e: any) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: false, message: e.message }));
-    }
-    return;
-  }
-
-  // 12. Health check
+  // 8. Health check
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "OK", activeClients: connectedClients.size, totalSavedMessages: serverStorage.getMessages().length }));
@@ -677,15 +492,22 @@ wss.on("connection", (ws: WebSocket) => {
 
       if (msg.type === "START_STREAM") {
         streamingClients.add(ws);
-        ensureScreencastStream();
+        cdpClient.startScreencast().catch(() => {});
         return;
       }
 
-      // KÍCH HOẠT LIVE SYNC QUA WEBSOCKET VỚI LOG STREAMING TRỰC TIẾP
+      if (msg.type === "STOP_STREAM") {
+        streamingClients.delete(ws);
+        if (streamingClients.size === 0) {
+          cdpClient.stopScreencast().catch(() => {});
+        }
+        return;
+      }
+
       if (msg.type === "START_LIVE_SYNC") {
         console.log("⚡ Starting Live Sync via WebSocket...");
         try {
-          const dumpResult = await executeFullMasterResync(sendCdpCommand, (update) => {
+          const dumpResult = await executeFullMasterResync((update) => {
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(
                 JSON.stringify({
@@ -725,7 +547,7 @@ wss.on("connection", (ws: WebSocket) => {
       }
 
       if (msg.type === "SELECT_CONVERSATION" && msg.conversationName) {
-        await scrapeConversationWithHistory(sendCdpCommand, msg.conversationId || "general", msg.conversationName, 1);
+        await scrapeConversationWithHistory(msg.conversationId || "general", msg.conversationName, 1);
         return;
       }
 
@@ -733,37 +555,20 @@ wss.on("connection", (ws: WebSocket) => {
         const clickX = Math.round(msg.x);
         const clickY = Math.round(msg.y);
         try {
-          if (screencastWs && screencastWs.readyState === WebSocket.OPEN) {
-            screencastWs.send(
-              JSON.stringify({
-                id: 101,
-                method: "Input.dispatchMouseEvent",
-                params: { type: "mousePressed", button: "left", clickCount: 1, x: clickX, y: clickY },
-              })
-            );
-            screencastWs.send(
-              JSON.stringify({
-                id: 102,
-                method: "Input.dispatchMouseEvent",
-                params: { type: "mouseReleased", button: "left", clickCount: 1, x: clickX, y: clickY },
-              })
-            );
-          } else {
-            await sendCdpCommand("Input.dispatchMouseEvent", {
-              type: "mousePressed",
-              button: "left",
-              clickCount: 1,
-              x: clickX,
-              y: clickY,
-            });
-            await sendCdpCommand("Input.dispatchMouseEvent", {
-              type: "mouseReleased",
-              button: "left",
-              clickCount: 1,
-              x: clickX,
-              y: clickY,
-            });
-          }
+          await cdpClient.send("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            button: "left",
+            clickCount: 1,
+            x: clickX,
+            y: clickY,
+          });
+          await cdpClient.send("Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            button: "left",
+            clickCount: 1,
+            x: clickX,
+            y: clickY,
+          });
         } catch (err) {}
         return;
       }
@@ -775,44 +580,33 @@ wss.on("connection", (ws: WebSocket) => {
         const deltaY = Number(msg.deltaY) || 0;
 
         try {
-          if (screencastWs && screencastWs.readyState === WebSocket.OPEN) {
-            screencastWs.send(
-              JSON.stringify({
-                id: 106,
-                method: "Input.dispatchMouseEvent",
-                params: { type: "mouseWheel", x: wheelX, y: wheelY, deltaX, deltaY },
-              })
-            );
-          }
+          await cdpClient.send("Input.dispatchMouseEvent", {
+            type: "mouseWheel",
+            x: wheelX,
+            y: wheelY,
+            deltaX,
+            deltaY,
+          });
         } catch (err) {}
         return;
       }
 
       if (msg.type === "TYPE" && msg.text) {
         try {
-          if (screencastWs && screencastWs.readyState === WebSocket.OPEN) {
-            screencastWs.send(
-              JSON.stringify({
-                id: 103,
-                method: "Input.insertText",
-                params: { text: msg.text },
-              })
-            );
-            screencastWs.send(
-              JSON.stringify({
-                id: 104,
-                method: "Input.dispatchKeyEvent",
-                params: { type: "rawKeyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
-              })
-            );
-            screencastWs.send(
-              JSON.stringify({
-                id: 105,
-                method: "Input.dispatchKeyEvent",
-                params: { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
-              })
-            );
-          }
+          await cdpClient.send("Input.insertText", { text: msg.text });
+          await cdpClient.send("Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            key: "Enter",
+            code: "Enter",
+            windowsVirtualKeyCode: 13,
+            text: "\r",
+          });
+          await cdpClient.send("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "Enter",
+            code: "Enter",
+            windowsVirtualKeyCode: 13,
+          });
         } catch (err) {}
         return;
       }
@@ -832,7 +626,6 @@ wss.on("connection", (ws: WebSocket) => {
         const msgId = nanoid();
         const ts = hlc.now();
         const convId = msg.conversationId || "general";
-
         const cleaned = cleanMessageContent(msg.textContent || "");
 
         const savedMsg = await serverStorage.addMessage({
@@ -879,8 +672,8 @@ wss.on("connection", (ws: WebSocket) => {
 
         if (cleaned.cleanText) {
           try {
-            await sendCdpCommand("Input.insertText", { text: cleaned.cleanText });
-            await sendCdpCommand("Input.dispatchKeyEvent", {
+            await cdpClient.send("Input.insertText", { text: cleaned.cleanText });
+            await cdpClient.send("Input.dispatchKeyEvent", {
               type: "rawKeyDown",
               key: "Enter",
               code: "Enter",
@@ -889,7 +682,7 @@ wss.on("connection", (ws: WebSocket) => {
               unmodifiedText: "\r",
               text: "\r",
             });
-            await sendCdpCommand("Input.dispatchKeyEvent", {
+            await cdpClient.send("Input.dispatchKeyEvent", {
               type: "keyUp",
               key: "Enter",
               code: "Enter",
@@ -907,10 +700,13 @@ wss.on("connection", (ws: WebSocket) => {
   ws.on("close", () => {
     connectedClients.delete(ws);
     streamingClients.delete(ws);
+    if (streamingClients.size === 0) {
+      cdpClient.stopScreencast().catch(() => {});
+    }
   });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
-  console.log(`⚡ Live Sync Streaming with real-time progress active`);
+  console.log(`⚡ Singleton Multiplexed CDP Engine & Zero-Loss Ingestion Pipeline active`);
 });

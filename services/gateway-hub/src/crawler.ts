@@ -1,5 +1,6 @@
 import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
-import { cleanMessageContent, parseTimestamp, ParsedReaction } from "./normalizer.js";
+import { cleanMessageContent, parseTimestamp } from "./normalizer.js";
+import { cdpClient } from "./cdp_client.js";
 
 export interface SyncProgressUpdate {
   current: number;
@@ -8,7 +9,7 @@ export interface SyncProgressUpdate {
   currentId: string;
   messageCount: number;
   percent: number;
-  stage: "STARTING" | "EXTRACTING_SIDEBAR" | "SCRAPING_CONVERSATION" | "SANITIZING" | "COMPLETED" | "ERROR";
+  stage: "STARTING" | "EXTRACTING_INDEXEDDB" | "EXTRACTING_SIDEBAR" | "SCRAPING_CONVERSATION" | "SANITIZING" | "COMPLETED" | "ERROR";
   log: string;
 }
 
@@ -22,9 +23,182 @@ export interface MasterDumpResult {
 }
 
 /**
- * Trích xuất chuẩn xác toàn bộ danh sách hội thoại từ Sidebar của Zalo Web
+ * TRÍCH XUẤT TRỰC TIẾP DỮ LIỆU ĐÃ GIẢI MÃ TỪ INDEXEDDB & REDUX STORE CỦA ZALO WEB (Zero-Loss Pipeline)
  */
-export async function extractSidebarConversations(sendCdpCommand: (method: string, params?: any) => Promise<any>): Promise<StoredConversation[]> {
+export async function extractFromZaloIndexedDB(): Promise<{
+  conversations: StoredConversation[];
+  messagesByConv: Record<string, StoredMessage[]>;
+} | null> {
+  const script = `
+    (async () => {
+      try {
+        const result = {
+          conversations: [],
+          messages: []
+        };
+
+        // 1. Kiểm tra in-memory Redux store của Zalo Web
+        if (window.appStore && typeof window.appStore.getState === 'function') {
+          try {
+            const state = window.appStore.getState();
+            if (state && (state.threads || state.conversations || state.chats)) {
+              const threads = state.threads?.threads || state.conversations?.list || state.chats || [];
+              for (const [key, t] of Object.entries(threads)) {
+                if (t && typeof t === 'object') {
+                  result.conversations.push({
+                    id: t.id || t.threadId || key,
+                    name: (t.name || t.displayName || t.title || "").replace(/\\u00A0/g, ' ').trim(),
+                    avatar: t.avatar || t.thumb || t.avatarUrl || "",
+                    lastMessage: t.lastMessage || t.snippet || "",
+                    lastTimestamp: t.timestamp || t.lastTime || Date.now(),
+                    type: (t.isGroup || t.type === 1 || t.type === "group") ? "GROUP" : "DIRECT",
+                  });
+                }
+              }
+            }
+          } catch (reduxErr) {}
+        }
+
+        // 2. Quét toàn bộ cơ sở dữ liệu IndexedDB của Zalo trong Chromium
+        if (window.indexedDB && typeof window.indexedDB.databases === 'function') {
+          const dbs = await window.indexedDB.databases();
+          for (const dbInfo of dbs) {
+            if (!dbInfo.name) continue;
+            try {
+              const db = await new Promise((resolve, reject) => {
+                const req = indexedDB.open(dbInfo.name);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+              });
+
+              const storeNames = Array.from(db.objectStoreNames);
+              for (const storeName of storeNames) {
+                try {
+                  const items = await new Promise((resolve) => {
+                    const tx = db.transaction(storeName, "readonly");
+                    const store = tx.objectStore(storeName);
+                    const req = store.getAll();
+                    req.onsuccess = () => resolve(req.result || []);
+                    req.onerror = () => resolve([]);
+                  });
+
+                  // Trích xuất hội thoại từ IndexedDB
+                  if (storeName.includes('thread') || storeName.includes('conv') || storeName.includes('recent')) {
+                    for (const item of items) {
+                      if (item && (item.id || item.threadId || item.convId)) {
+                        const name = (item.name || item.displayName || item.title || "").replace(/\\u00A0/g, ' ').trim();
+                        if (name) {
+                          result.conversations.push({
+                            id: String(item.id || item.threadId || item.convId),
+                            name: name,
+                            avatar: item.avatar || item.thumb || item.avatarUrl || "",
+                            lastMessage: item.lastMessage || item.snippet || item.lastMsg || "",
+                            lastTimestamp: item.timestamp || item.lastTime || item.updatedAt || Date.now(),
+                            type: item.isGroup ? "GROUP" : "DIRECT",
+                          });
+                        }
+                      }
+                    }
+                  }
+
+                  // Trích xuất tin nhắn lịch sử từ IndexedDB
+                  if (storeName.includes('msg') || storeName.includes('message') || storeName.includes('chat')) {
+                    for (const msg of items) {
+                      if (msg && (msg.msgId || msg.id || msg.cliMsgId)) {
+                        const rawText = msg.message || msg.content || msg.text || msg.msgBody || (typeof msg.data === 'string' ? msg.data : "");
+                        const isMe = Boolean(msg.isMe || msg.fromMe || msg.senderType === 1);
+                        result.messages.push({
+                          msgId: String(msg.msgId || msg.globalMsgId || msg.id || msg.cliMsgId),
+                          conversationId: String(msg.threadId || msg.convId || msg.toId || msg.fromId || "general"),
+                          rawText: typeof rawText === 'string' ? rawText : "",
+                          sender: isMe ? "ME" : "OTHER",
+                          timestamp: msg.timestamp || msg.ts || msg.sendTime || Date.now(),
+                          type: msg.msgType || msg.type || "TEXT",
+                          mediaUrl: msg.mediaUrl || msg.url || msg.thumbUrl || null,
+                        });
+                      }
+                    }
+                  }
+                } catch (storeErr) {}
+              }
+              db.close();
+            } catch (dbErr) {}
+          }
+        }
+
+        return result;
+      } catch (err) {
+        return null;
+      }
+    })()
+  `;
+
+  try {
+    const evalRes = await cdpClient.send("Runtime.evaluate", {
+      expression: script,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+
+    const data = evalRes?.result?.value;
+    if (!data || (!data.conversations?.length && !data.messages?.length)) {
+      return null;
+    }
+
+    const conversations: StoredConversation[] = [];
+    const convMap = new Map<string, StoredConversation>();
+
+    for (const c of data.conversations) {
+      if (c.name && !convMap.has(c.name.toLowerCase())) {
+        const storedConv: StoredConversation = {
+          id: c.id,
+          name: c.name,
+          avatar: c.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(c.name)}`,
+          type: c.type || "DIRECT",
+          lastMessage: c.lastMessage || "Tin nhắn đồng bộ từ IndexedDB",
+          lastTimestamp: typeof c.lastTimestamp === 'number' ? c.lastTimestamp : Date.now(),
+          unreadCount: 0,
+        };
+        convMap.set(c.name.toLowerCase(), storedConv);
+        conversations.push(storedConv);
+      }
+    }
+
+    const messagesByConv: Record<string, StoredMessage[]> = {};
+    for (const m of data.messages) {
+      const convId = m.conversationId || "general";
+      if (!messagesByConv[convId]) {
+        messagesByConv[convId] = [];
+      }
+      const cleaned = cleanMessageContent(m.rawText);
+      const storedMsg = await serverStorage.addMessage({
+        msgId: m.msgId,
+        conversationId: convId,
+        textContent: cleaned.cleanText,
+        sender: m.sender,
+        status: "DELIVERED",
+        timestamp: typeof m.timestamp === 'number' ? m.timestamp : Date.now(),
+        type: m.type,
+        mediaUrl: m.mediaUrl,
+        reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
+        mentions: cleaned.mentions.length > 0 ? cleaned.mentions : undefined,
+      });
+      messagesByConv[convId].push(storedMsg);
+    }
+
+    return {
+      conversations,
+      messagesByConv,
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Trích xuất danh sách hội thoại từ Sidebar Zalo Web
+ */
+export async function extractSidebarConversations(): Promise<StoredConversation[]> {
   const script = `
     (() => {
       const items = [];
@@ -65,7 +239,7 @@ export async function extractSidebarConversations(sendCdpCommand: (method: strin
   `;
 
   try {
-    const result = await sendCdpCommand("Runtime.evaluate", {
+    const result = await cdpClient.send("Runtime.evaluate", {
       expression: script,
       returnByValue: true,
       awaitPromise: true,
@@ -77,10 +251,9 @@ export async function extractSidebarConversations(sendCdpCommand: (method: strin
 }
 
 /**
- * Mở cuộc hội thoại bằng click chuẩn xác và cào toàn bộ lịch sử tin nhắn
+ * Cào tin nhắn của một cuộc hội thoại từ DOM cây
  */
 export async function scrapeConversationWithHistory(
-  sendCdpCommand: (method: string, params?: any) => Promise<any>,
   convId: string,
   convName: string,
   maxScrollUpPasses: number = 2
@@ -92,7 +265,6 @@ export async function scrapeConversationWithHistory(
     (async () => {
       const targetName = ${escapedName}.toLowerCase();
       
-      // 1. Tìm và click chọn cuộc hội thoại trong sidebar
       const convElements = Array.from(document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item'));
       const targetEl = convElements.find(el => {
         const titleContainer = el.querySelector('.conv-item-title, [class*="conv-item-title"], .conv-item-header, .title-wrap');
@@ -112,7 +284,6 @@ export async function scrapeConversationWithHistory(
         await new Promise(r => setTimeout(r, 600));
       }
 
-      // 2. Kích hoạt cuộn ngược lên trên để nạp thêm tin nhắn lịch sử (Scroll Buffer Hydration)
       const scrollContainers = document.querySelectorAll('#chat-body, .message-view-scroll, .chat-history, [class*="message-view__scroll"], [class*="chat-message-list"]');
       for (const container of scrollContainers) {
         for (let pass = 0; pass < ${maxScrollUpPasses}; pass++) {
@@ -123,7 +294,6 @@ export async function scrapeConversationWithHistory(
         }
       }
 
-      // 3. Phân giải DOM cây tin nhắn với AST Pre-cleaning
       const rawMessages = [];
       const msgNodes = Array.from(document.querySelectorAll('.chat-message, [class*="chat-message"], .msg-item, [id^="msg-"], .message-view, [data-id^="msg_"]'));
       
@@ -136,7 +306,6 @@ export async function scrapeConversationWithHistory(
         }
 
         const clone = el.cloneNode(true);
-
         const pruneSelectors = [
           '.react-container', '.react-list', '.react-total', '.reaction-list',
           '.card-time', '.time', '.quote-content', '.reply-container',
@@ -189,7 +358,7 @@ export async function scrapeConversationWithHistory(
   `;
 
   try {
-    const result = await sendCdpCommand("Runtime.evaluate", {
+    const result = await cdpClient.send("Runtime.evaluate", {
       expression: script,
       returnByValue: true,
       awaitPromise: true,
@@ -235,7 +404,6 @@ export async function scrapeConversationWithHistory(
  * Thực thi Full Master Data Resync toàn diện với Live Progress Updates
  */
 export async function executeFullMasterResync(
-  sendCdpCommand: (method: string, params?: any) => Promise<any>,
   onProgress?: (update: SyncProgressUpdate) => void
 ): Promise<MasterDumpResult> {
   console.log("🚀 [Full Resync] Starting Full Master Session Data Dump with Live Progress...");
@@ -247,12 +415,53 @@ export async function executeFullMasterResync(
     currentId: "init",
     messageCount: 0,
     percent: 5,
-    stage: "EXTRACTING_SIDEBAR",
-    log: "🔍 Đang kết nối và trích xuất danh sách hội thoại từ Zalo Web...",
+    stage: "EXTRACTING_INDEXEDDB",
+    log: "🔍 Đang trích xuất dữ liệu giải mã trực tiếp từ IndexedDB của Zalo...",
   });
 
-  // 1. Lấy chuẩn xác danh sách hội thoại
-  const conversations = await extractSidebarConversations(sendCdpCommand);
+  // 1. Thử trích xuất trực tiếp từ IndexedDB
+  const idbData = await extractFromZaloIndexedDB();
+  if (idbData && idbData.conversations.length > 0) {
+    serverStorage.saveConversations(idbData.conversations);
+    let totalIndexedDbMsgs = 0;
+    for (const msgs of Object.values(idbData.messagesByConv)) {
+      totalIndexedDbMsgs += msgs.length;
+    }
+
+    onProgress?.({
+      current: idbData.conversations.length,
+      total: idbData.conversations.length,
+      currentName: "IndexedDB Zalo",
+      currentId: "idb_done",
+      messageCount: totalIndexedDbMsgs,
+      percent: 100,
+      stage: "COMPLETED",
+      log: `🎉 [Zero-Loss IndexedDB] Đã trích xuất ${idbData.conversations.length} hội thoại và ${totalIndexedDbMsgs} tin nhắn từ cơ sở dữ liệu Zalo!`,
+    });
+
+    serverStorage.flushToDisk();
+    return {
+      success: true,
+      totalConversations: idbData.conversations.length,
+      totalMessages: totalIndexedDbMsgs,
+      conversations: idbData.conversations,
+      messagesByConversation: idbData.messagesByConv,
+    };
+  }
+
+  // 2. Fallback sang Sidebar & DOM AST Scraping
+  onProgress?.({
+    current: 0,
+    total: 100,
+    currentName: "Sidebar DOM",
+    currentId: "sidebar_fallback",
+    messageCount: 0,
+    percent: 15,
+    stage: "EXTRACTING_SIDEBAR",
+    log: "📋 IndexedDB đang khóa. Chuyển sang cào cây DOM Sidebar...",
+  });
+
+  const conversations = await extractSidebarConversations();
   if (conversations.length > 0) {
     serverStorage.saveConversations(conversations);
   }
@@ -264,18 +473,6 @@ export async function executeFullMasterResync(
   const targetConvs = allConvs.slice(0, 15);
   const total = targetConvs.length;
 
-  onProgress?.({
-    current: 0,
-    total: total,
-    currentName: "Danh sách hội thoại",
-    currentId: "sidebar",
-    messageCount: 0,
-    percent: 15,
-    stage: "SCRAPING_CONVERSATION",
-    log: `📋 Đã tìm thấy ${allConvs.length} cuộc hội thoại. Bắt đầu cào chi tiết từng nhóm...`,
-  });
-
-  // 2. Cào tin nhắn sâu từng cuộc trò chuyện và gửi tiến trình trực tiếp
   for (let i = 0; i < total; i++) {
     const conv = targetConvs[i];
     const currentPercent = Math.round(15 + ((i + 1) / total) * 75);
@@ -291,7 +488,7 @@ export async function executeFullMasterResync(
       log: `📂 [${i + 1}/${total}] Đang mở "${conv.name}" & cuộn tải lịch sử tin nhắn...`,
     });
 
-    const msgs = await scrapeConversationWithHistory(sendCdpCommand, conv.id, conv.name, 2);
+    const msgs = await scrapeConversationWithHistory(conv.id, conv.name, 2);
     messagesByConv[conv.id] = msgs;
     totalMessagesCount += msgs.length;
 

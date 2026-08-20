@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   db,
   Conversation,
@@ -216,11 +216,30 @@ export default function ZaloMultiDeviceApp() {
   const [navTab, setNavTab] = useState<"MESSAGES" | "CONTACTS" | "SETTINGS">("MESSAGES");
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(50);
+  const [viewportHeight, setViewportHeight] = useState<string>("100dvh");
 
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const logsEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Dynamic Viewport & Virtual Keyboard Listener
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.visualViewport) {
+      const handleResize = () => {
+        if (window.visualViewport) {
+          setViewportHeight(`${window.visualViewport.height}px`);
+        }
+      };
+      window.visualViewport.addEventListener("resize", handleResize);
+      window.visualViewport.addEventListener("scroll", handleResize);
+      return () => {
+        window.visualViewport?.removeEventListener("resize", handleResize);
+        window.visualViewport?.removeEventListener("scroll", handleResize);
+      };
+    }
+  }, []);
 
   // Lấy dữ liệu từ IndexedDB (Dexie) và khử trùng lặp
   const rawConversations = useLiveQuery(() => db.conversations.toArray(), []) || [];
@@ -232,11 +251,19 @@ export default function ZaloMultiDeviceApp() {
   ) || [];
   const activeMessages = deduplicateById(rawMessages);
 
+  // Virtualized Slice: Chỉ render tối đa N tin nhắn gần nhất để giữ DOM < 50 nodes
+  const windowedMessages = useMemo(() => {
+    if (activeMessages.length <= visibleMessageCount) {
+      return activeMessages;
+    }
+    return activeMessages.slice(activeMessages.length - visibleMessageCount);
+  }, [activeMessages, visibleMessageCount]);
+
   const currentActiveConv = localConversations.find((c) => c.id === activeConvId) || localConversations[0];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages.length]);
+  }, [windowedMessages.length]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -262,7 +289,7 @@ export default function ZaloMultiDeviceApp() {
     }
   };
 
-  // Tải toàn bộ tin nhắn & Media đã lưu trên Server Volume
+  // Tải tin nhắn từ Server Volume
   const fetchServerMessages = async (convId: string, convName?: string, refresh: boolean = false) => {
     try {
       const targetName = convName || currentActiveConv?.name || "";
@@ -295,6 +322,7 @@ export default function ZaloMultiDeviceApp() {
 
   const handleSelectConversation = (conv: Conversation) => {
     setActiveConvId(conv.id);
+    setVisibleMessageCount(50);
     fetchServerMessages(conv.id, conv.name);
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -314,7 +342,7 @@ export default function ZaloMultiDeviceApp() {
     }
   }, [activeConvId]);
 
-  // Khởi tạo và kết nối WebSocket Gateway (Hỗ trợ Live Sync Stream & Message Fan-out)
+  // Khởi tạo WebSocket Gateway Hub
   useEffect(() => {
     if (typeof window !== "undefined") {
       seedInitialConversations();
@@ -332,7 +360,6 @@ export default function ZaloMultiDeviceApp() {
         try {
           const data = JSON.parse(event.data);
 
-          // XỬ LÝ TIẾN TRÌNH ĐỒNG BỘ TRỰC TIẾP THỜI GIAN THỰC (LIVE SYNC STREAM)
           if (data.event === "LIVE_SYNC_PROGRESS") {
             setSyncPercent(data.percent || 0);
             setSyncCurrentName(data.currentName || "");
@@ -352,7 +379,6 @@ export default function ZaloMultiDeviceApp() {
             }, 1500);
           }
 
-          // XỬ LÝ TIN NHẮN REALTIME
           if (data.event === "MESSAGE_FANOUT") {
             const convId = data.conversationId || activeConvId || "conv_1";
             try {
@@ -432,7 +458,7 @@ export default function ZaloMultiDeviceApp() {
     setInputText("");
   };
 
-  // Upload Ảnh / Tệp đính kèm lên Server Volume
+  // Upload Ảnh / Tệp đính kèm
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -483,12 +509,12 @@ export default function ZaloMultiDeviceApp() {
     }
   };
 
-  // KÍCH HOẠT ĐỒNG BỘ TRỰC TIẾP (LIVE SYNC STREAM)
+  // KÍCH HOẠT ĐỒNG BỘ TRỰC TIẾP
   const handleTriggerLiveSync = () => {
     setIsFullSyncing(true);
     setShowSyncModal(true);
     setSyncPercent(5);
-    setSyncLogs(["🚀 Bắt đầu quá trình đồng bộ dữ liệu trực tiếp..."]);
+    setSyncLogs(["🚀 Bắt đầu quá trình đồng bộ Zero-Loss IndexedDB..."]);
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "START_LIVE_SYNC" }));
@@ -515,25 +541,86 @@ export default function ZaloMultiDeviceApp() {
   );
 
   return (
-    <div style={{ display: "flex", height: "100vh", width: "100vw", overflow: "hidden", background: "#f0f2f5", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+    <div
+      style={{
+        display: "flex",
+        height: viewportHeight,
+        width: "100vw",
+        overflow: "hidden",
+        background: "#f0f2f5",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        overscrollBehaviorY: "none",
+        boxSizing: "border-box",
+      }}
+    >
       {/* 1. Thanh Menu Điều Hướng Cột Trái Cùng */}
-      <div style={{ width: 64, background: "#0068ff", display: "flex", flexDirection: "column", alignItems: "center", padding: "16px 0", justifyContent: "space-between", flexShrink: 0 }}>
+      <div
+        style={{
+          width: 64,
+          background: "#0068ff",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          padding: "16px 0",
+          justifyContent: "space-between",
+          flexShrink: 0,
+          boxSizing: "border-box",
+        }}
+      >
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 20, width: "100%" }}>
-          <div style={{ width: 44, height: 44, borderRadius: "50%", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold", color: "#0068ff", fontSize: 18, boxShadow: "0 2px 6px rgba(0,0,0,0.15)" }}>
+          <div
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: "50%",
+              background: "#fff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontWeight: "bold",
+              color: "#0068ff",
+              fontSize: 18,
+              boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
+            }}
+          >
             Z
           </div>
 
           <button
             onClick={() => setNavTab("MESSAGES")}
             title="Tin nhắn"
-            style={{ width: 44, height: 44, borderRadius: 12, background: navTab === "MESSAGES" ? "rgba(255,255,255,0.2)" : "transparent", border: "none", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 12,
+              background: navTab === "MESSAGES" ? "rgba(255,255,255,0.2)" : "transparent",
+              border: "none",
+              color: "#fff",
+              fontSize: 20,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
           >
             💬
           </button>
           <button
             onClick={() => setNavTab("CONTACTS")}
             title="Danh bạ"
-            style={{ width: 44, height: 44, borderRadius: 12, background: navTab === "CONTACTS" ? "rgba(255,255,255,0.2)" : "transparent", border: "none", color: "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 12,
+              background: navTab === "CONTACTS" ? "rgba(255,255,255,0.2)" : "transparent",
+              border: "none",
+              color: "#fff",
+              fontSize: 20,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
           >
             👥
           </button>
@@ -543,19 +630,47 @@ export default function ZaloMultiDeviceApp() {
           <Link
             href="/session"
             title="Xem màn hình Master Session"
-            style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(255,255,255,0.15)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", textDecoration: "none", fontSize: 18 }}
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 12,
+              background: "rgba(255,255,255,0.15)",
+              color: "#fff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              textDecoration: "none",
+              fontSize: 18,
+            }}
           >
             🖥️
           </Link>
           <div
             title={`Trạng thái kết nối: ${wsStatus}`}
-            style={{ width: 12, height: 12, borderRadius: "50%", background: wsStatus === "CONNECTED" ? "#10b981" : "#ef4444", boxShadow: "0 0 6px rgba(0,0,0,0.3)" }}
+            style={{
+              width: 12,
+              height: 12,
+              borderRadius: "50%",
+              background: wsStatus === "CONNECTED" ? "#10b981" : "#ef4444",
+              boxShadow: "0 0 6px rgba(0,0,0,0.3)",
+            }}
           />
         </div>
       </div>
 
       {/* 2. Cột Danh Sách Hội Thoại Không Trùng Lặp */}
-      <div style={{ width: 340, background: "#ffffff", borderRight: "1px solid #e5e7eb", display: "flex", flexDirection: "column", flexShrink: 0, height: "100%" }}>
+      <div
+        style={{
+          width: 340,
+          background: "#ffffff",
+          borderRight: "1px solid #e5e7eb",
+          display: "flex",
+          flexDirection: "column",
+          flexShrink: 0,
+          height: "100%",
+          boxSizing: "border-box",
+        }}
+      >
         <div style={{ padding: "14px 16px", borderBottom: "1px solid #f1f5f9", flexShrink: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1e293b" }}>Hội thoại</h2>
@@ -563,7 +678,20 @@ export default function ZaloMultiDeviceApp() {
               onClick={handleTriggerLiveSync}
               disabled={isFullSyncing}
               title="Đồng bộ trực tiếp và xem tiến trình thời gian thực"
-              style={{ padding: "6px 14px", background: isFullSyncing ? "#e2e8f0" : "#0068ff", border: "none", borderRadius: 14, fontSize: 12, fontWeight: 600, color: isFullSyncing ? "#64748b" : "#fff", cursor: isFullSyncing ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 6, boxShadow: "0 2px 6px rgba(0,104,255,0.25)" }}
+              style={{
+                padding: "6px 14px",
+                background: isFullSyncing ? "#e2e8f0" : "#0068ff",
+                border: "none",
+                borderRadius: 14,
+                fontSize: 12,
+                fontWeight: 600,
+                color: isFullSyncing ? "#64748b" : "#fff",
+                cursor: isFullSyncing ? "wait" : "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                boxShadow: "0 2px 6px rgba(0,104,255,0.25)",
+              }}
             >
               {isFullSyncing ? "⏳ Đang sync..." : "⚡ Đồng bộ trực tiếp"}
             </button>
@@ -573,7 +701,16 @@ export default function ZaloMultiDeviceApp() {
             placeholder="🔍 Tìm kiếm tin nhắn, liên hệ..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            style={{ width: "100%", padding: "8px 14px", background: "#f1f5f9", border: "none", borderRadius: 8, outline: "none", fontSize: 13, boxSizing: "border-box" }}
+            style={{
+              width: "100%",
+              padding: "8px 14px",
+              background: "#f1f5f9",
+              border: "none",
+              borderRadius: 8,
+              outline: "none",
+              fontSize: 13,
+              boxSizing: "border-box",
+            }}
           />
         </div>
 
@@ -622,7 +759,7 @@ export default function ZaloMultiDeviceApp() {
       </div>
 
       {/* 3. Khung Chat Chính (Main Chat Area) */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#ffffff", height: "100%", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#ffffff", height: "100%", minWidth: 0, boxSizing: "border-box" }}>
         {/* Chat Header */}
         <div style={{ height: 64, padding: "0 24px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#ffffff", flexShrink: 0 }}>
           {currentActiveConv ? (
@@ -632,7 +769,7 @@ export default function ZaloMultiDeviceApp() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b" }}>{currentActiveConv.name}</div>
                 <div style={{ fontSize: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}>
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981" }}></span>
-                  Đang hoạt động (Đồng bộ sạch & Khử trùng lặp)
+                  Đang hoạt động (Singleton Multiplexed Hub)
                 </div>
               </div>
             </div>
@@ -656,16 +793,36 @@ export default function ZaloMultiDeviceApp() {
           </div>
         </div>
 
-        {/* Messages Stream View */}
-        <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14, background: "#f8fafc", minHeight: 0 }}>
-          {activeMessages.length === 0 ? (
+        {/* Messages Stream View với Virtualized Windowing */}
+        <div style={{ flex: 1, padding: "16px 24px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, background: "#f8fafc", minHeight: 0 }}>
+          {activeMessages.length > visibleMessageCount && (
+            <button
+              onClick={() => setVisibleMessageCount((prev) => prev + 50)}
+              style={{
+                alignSelf: "center",
+                padding: "6px 16px",
+                background: "#e2e8f0",
+                color: "#475569",
+                border: "none",
+                borderRadius: 12,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                marginBottom: 6,
+              }}
+            >
+              ⬆️ Tải thêm 50 tin nhắn cũ hơn ({activeMessages.length - visibleMessageCount} tin còn lại)
+            </button>
+          )}
+
+          {windowedMessages.length === 0 ? (
             <div style={{ margin: "auto", textAlign: "center", color: "#94a3b8" }}>
               <div style={{ fontSize: 40, marginBottom: 10 }}>💬</div>
               <div style={{ fontSize: 15, fontWeight: 600, color: "#475569" }}>Lịch sử tin nhắn của {currentActiveConv?.name || "cuộc hội thoại"}</div>
-              <div style={{ fontSize: 13, marginTop: 4 }}>Bấm <b>"⚡ Đồng bộ trực tiếp"</b> để xem toàn bộ quá trình nạp tin nhắn!</div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>Bấm <b>"⚡ Đồng bộ trực tiếp"</b> để tải toàn bộ tin nhắn từ IndexedDB!</div>
             </div>
           ) : (
-            activeMessages.map((m) => {
+            windowedMessages.map((m) => {
               const isMe = m.sender === "ME";
               return (
                 <div
@@ -709,7 +866,7 @@ export default function ZaloMultiDeviceApp() {
                       />
                     )}
 
-                    {/* Media: Audio / Tin nhắn thoại */}
+                    {/* Media: Audio */}
                     {m.mediaUrl && m.type === "VOICE" && (
                       <audio controls src={m.mediaUrl} style={{ width: "100%", marginBottom: 6 }} />
                     )}
@@ -724,7 +881,7 @@ export default function ZaloMultiDeviceApp() {
                       />
                     )}
 
-                    {/* Text Content Renderer với @mentions & URL clickable */}
+                    {/* Text Content Renderer với @mentions & URL */}
                     {m.textContent && (
                       <MessageContentRenderer
                         text={m.textContent}
@@ -769,15 +926,14 @@ export default function ZaloMultiDeviceApp() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* CỬA SỔ THEO DÕI ĐỒNG BỘ TRỰC TIẾP THỜI GIAN THỰC (LIVE SYNC CONSOLE MODAL) */}
+        {/* CỬA SỔ THEO DÕI ĐỒNG BỘ TRỰC TIẾP THỜI GIAN THỰC */}
         {showSyncModal && (
           <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(15, 23, 42, 0.75)", backdropFilter: "blur(4px)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
             <div style={{ width: "100%", maxWidth: 640, background: "#1e293b", border: "1px solid #334155", borderRadius: 16, overflow: "hidden", boxShadow: "0 20px 40px rgba(0,0,0,0.5)", display: "flex", flexDirection: "column" }}>
-              {/* Modal Header */}
               <div style={{ padding: "16px 20px", background: "#0f172a", borderBottom: "1px solid #334155", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <span style={{ fontSize: 20 }}>⚡</span>
-                  <span style={{ fontWeight: 700, fontSize: 16, color: "#f8fafc" }}>Tiến trình Đồng bộ Trực tiếp (Live Sync Stream)</span>
+                  <span style={{ fontWeight: 700, fontSize: 16, color: "#f8fafc" }}>Tiến trình Đồng bộ Trực tiếp (Zero-Loss IndexedDB Stream)</span>
                 </div>
                 <button
                   onClick={() => setShowSyncModal(false)}
@@ -788,10 +944,9 @@ export default function ZaloMultiDeviceApp() {
                 </button>
               </div>
 
-              {/* Progress Bar & Status */}
               <div style={{ padding: "18px 20px", borderBottom: "1px solid #334155", background: "#1e293b" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: 13, color: "#cbd5e1" }}>
-                  <span>{isFullSyncing ? `Đang xử lý: ${syncCurrentName || "Zalo Web Master"}` : "✅ Đồng bộ thành công!"}</span>
+                  <span>{isFullSyncing ? `Đang xử lý: ${syncCurrentName || "Zalo Master"}` : "✅ Đồng bộ thành công!"}</span>
                   <span style={{ fontWeight: 700, color: "#38bdf8" }}>{syncPercent}%</span>
                 </div>
                 <div style={{ width: "100%", height: 8, background: "#334155", borderRadius: 4, overflow: "hidden" }}>
@@ -806,7 +961,6 @@ export default function ZaloMultiDeviceApp() {
                 </div>
               </div>
 
-              {/* Live Terminal Logs Window */}
               <div style={{ height: 260, background: "#090d16", padding: "14px 18px", overflowY: "auto", fontFamily: "monospace", fontSize: 12, color: "#4ade80", display: "flex", flexDirection: "column", gap: 6 }}>
                 {syncLogs.map((line, idx) => (
                   <div key={idx} style={{ lineHeight: 1.4, wordBreak: "break-word" }}>
@@ -816,10 +970,9 @@ export default function ZaloMultiDeviceApp() {
                 <div ref={logsEndRef} />
               </div>
 
-              {/* Modal Footer */}
               <div style={{ padding: "14px 20px", background: "#0f172a", borderTop: "1px solid #334155", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{ fontSize: 12, color: "#64748b" }}>
-                  {isFullSyncing ? "⚡ Đang cào dữ liệu & lưu vĩnh viễn vào Server Volume..." : "Dữ liệu đã được nạp 100% vào PWA."}
+                  {isFullSyncing ? "⚡ Đang trích xuất & lưu vào Server Volume..." : "Dữ liệu đã được nạp 100% vào PWA."}
                 </span>
                 <button
                   onClick={() => setShowSyncModal(false)}
