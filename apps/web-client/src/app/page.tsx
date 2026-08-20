@@ -84,7 +84,98 @@ function AvatarWithFallback({
   );
 }
 
-// 2. Component Render Nội dung tin nhắn (hỗ trợ @mentions và link clickable)
+// 2. Component Phát Tin Nhắn Thoại (Audio Voice Player)
+function AudioVoicePlayer({ src, isMe }: { src: string; isMe: boolean }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const finalSrc = src.startsWith("http") && typeof window !== "undefined" && !src.startsWith(window.location.origin)
+    ? `/api/media/proxy?url=${encodeURIComponent(src)}`
+    : src;
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play().catch(() => {});
+    }
+    setIsPlaying(!isPlaying);
+  };
+
+  const formatTime = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "8px 12px",
+        background: isMe ? "rgba(255,255,255,0.15)" : "#f1f5f9",
+        borderRadius: 20,
+        marginBottom: 6,
+        minWidth: 200,
+      }}
+    >
+      <audio
+        ref={audioRef}
+        src={finalSrc}
+        onTimeUpdate={() => audioRef.current && setCurrentTime(audioRef.current.currentTime)}
+        onLoadedMetadata={() => audioRef.current && setDuration(audioRef.current.duration)}
+        onEnded={() => setIsPlaying(false)}
+      />
+      <button
+        type="button"
+        onClick={togglePlay}
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: "50%",
+          background: isMe ? "#ffffff" : "#0068ff",
+          color: isMe ? "#0068ff" : "#ffffff",
+          border: "none",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 14,
+          flexShrink: 0,
+        }}
+      >
+        {isPlaying ? "⏸️" : "▶️"}
+      </button>
+
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 3 }}>
+        <input
+          type="range"
+          min={0}
+          max={duration || 100}
+          value={currentTime}
+          onChange={(e) => {
+            if (audioRef.current) {
+              audioRef.current.currentTime = Number(e.target.value);
+              setCurrentTime(Number(e.target.value));
+            }
+          }}
+          style={{ width: "100%", height: 4, accentColor: isMe ? "#ffffff" : "#0068ff", cursor: "pointer" }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, opacity: 0.85 }}>
+          <span>{formatTime(currentTime)}</span>
+          <span>{formatTime(duration)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 3. Component Render Nội dung tin nhắn (hỗ trợ @mentions và link clickable)
 function MessageContentRenderer({
   text,
   mentions,
@@ -154,7 +245,7 @@ function MessageContentRenderer({
   );
 }
 
-// 3. Component Tệp đính kèm (File Attachment Card)
+// 4. Component Tệp đính kèm (File Attachment Card)
 function FileAttachmentCard({
   name,
   size,
@@ -173,9 +264,13 @@ function FileAttachmentCard({
     return `${(bytes / 1048576).toFixed(1)} MB`;
   };
 
+  const finalUrl = url && url.startsWith("http") && typeof window !== "undefined" && !url.startsWith(window.location.origin)
+    ? `/api/media/proxy?url=${encodeURIComponent(url)}`
+    : (url || "#");
+
   return (
     <a
-      href={url || "#"}
+      href={finalUrl}
       target="_blank"
       rel="noopener noreferrer"
       style={{
@@ -204,7 +299,7 @@ function FileAttachmentCard({
 }
 
 export default function ZaloMultiDeviceApp() {
-  const [activeConvId, setActiveConvId] = useState<string>("conv_1");
+  const [activeConvId, setActiveConvId] = useState<string>("general");
   const [inputText, setInputText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [wsStatus, setWsStatus] = useState<"CONNECTED" | "DISCONNECTED" | "CONNECTING">("CONNECTING");
@@ -218,6 +313,7 @@ export default function ZaloMultiDeviceApp() {
   const [uploading, setUploading] = useState(false);
   const [visibleMessageCount, setVisibleMessageCount] = useState(50);
   const [viewportHeight, setViewportHeight] = useState<string>("100dvh");
+  const [isLoadingConversations, setIsLoadingConversations] = useState(true);
 
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -251,7 +347,7 @@ export default function ZaloMultiDeviceApp() {
   ) || [];
   const activeMessages = deduplicateById(rawMessages);
 
-  // Virtualized Slice: Chỉ render tối đa N tin nhắn gần nhất để giữ DOM < 50 nodes
+  // Virtualized Windowing: Giới hạn số DOM nodes hiển thị
   const windowedMessages = useMemo(() => {
     if (activeMessages.length <= visibleMessageCount) {
       return activeMessages;
@@ -269,13 +365,13 @@ export default function ZaloMultiDeviceApp() {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [syncLogs]);
 
-  // Đồng bộ danh sách hội thoại từ Server Volume
+  // Đồng bộ danh sách hội thoại từ Server Volume & phá vỡ Infinite Loading
   const fetchLiveConversations = async () => {
     try {
       const res = await fetch("/api/conversations");
       if (res.ok) {
         const liveConvs: Conversation[] = await res.json();
-        if (liveConvs && liveConvs.length > 0) {
+        if (Array.isArray(liveConvs) && liveConvs.length > 0) {
           for (const conv of liveConvs) {
             try { await db.conversations.put(conv); } catch {}
           }
@@ -286,6 +382,8 @@ export default function ZaloMultiDeviceApp() {
       }
     } catch (e) {
       console.warn("Failed to fetch live conversations:", e);
+    } finally {
+      setIsLoadingConversations(false);
     }
   };
 
@@ -296,7 +394,7 @@ export default function ZaloMultiDeviceApp() {
       const res = await fetch(`/api/messages?conversationId=${encodeURIComponent(convId)}&convName=${encodeURIComponent(targetName)}&refresh=${refresh}`);
       if (res.ok) {
         const msgs: LocalMessage[] = await res.json();
-        if (msgs && msgs.length > 0) {
+        if (Array.isArray(msgs) && msgs.length > 0) {
           for (const msg of msgs) {
             try {
               await db.messages.put({
@@ -342,11 +440,17 @@ export default function ZaloMultiDeviceApp() {
     }
   }, [activeConvId]);
 
-  // Khởi tạo WebSocket Gateway Hub
+  // Khởi tạo WebSocket Gateway Hub & Seed bảo vệ
   useEffect(() => {
     if (typeof window !== "undefined") {
-      seedInitialConversations();
-      fetchLiveConversations();
+      seedInitialConversations().then(() => {
+        fetchLiveConversations();
+      });
+
+      // Timeout boundary 2s để không bao giờ bị kẹt loading spinner
+      const loadingTimeout = setTimeout(() => {
+        setIsLoadingConversations(false);
+      }, 2000);
 
       const hostname = window.location.hostname || "127.0.0.1";
       const wsUrl = `ws://${hostname}:8080`;
@@ -374,13 +478,14 @@ export default function ZaloMultiDeviceApp() {
             if (data.dumpResult?.conversations && data.dumpResult?.messagesByConversation) {
               await db.reconcileFullState(data.dumpResult.conversations, data.dumpResult.messagesByConversation);
             }
+            setIsLoadingConversations(false);
             setTimeout(() => {
               setIsFullSyncing(false);
             }, 1500);
           }
 
           if (data.event === "MESSAGE_FANOUT") {
-            const convId = data.conversationId || activeConvId || "conv_1";
+            const convId = data.conversationId || activeConvId || "general";
             try {
               await db.messages.put({
                 msgId: data.msgId,
@@ -411,6 +516,7 @@ export default function ZaloMultiDeviceApp() {
       const timer = setInterval(fetchLiveConversations, 10000);
 
       return () => {
+        clearTimeout(loadingTimeout);
         clearInterval(timer);
         ws.close();
       };
@@ -424,7 +530,7 @@ export default function ZaloMultiDeviceApp() {
 
     const tempMsgId = nanoid();
     const now = Date.now();
-    const targetConvId = activeConvId || "conv_1";
+    const targetConvId = activeConvId || "general";
 
     try {
       await db.messages.put({
@@ -464,7 +570,7 @@ export default function ZaloMultiDeviceApp() {
     if (!file) return;
 
     setUploading(true);
-    const targetConvId = activeConvId || "conv_1";
+    const targetConvId = activeConvId || "general";
 
     try {
       const reader = new FileReader();
@@ -492,7 +598,7 @@ export default function ZaloMultiDeviceApp() {
                 sender: "ME",
                 status: "DELIVERED",
                 timestamp: Date.now(),
-                type: file.type.startsWith("image/") ? "IMAGE" : "FILE",
+                type: file.type.startsWith("image/") ? "IMAGE" : (file.type.startsWith("audio/") ? "VOICE" : "FILE"),
                 mediaUrl: result.message.mediaUrl,
                 mediaName: file.name,
                 mediaSize: file.size,
@@ -715,9 +821,33 @@ export default function ZaloMultiDeviceApp() {
         </div>
 
         <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
-          {filteredConversations.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "40px 20px", color: "#94a3b8", fontSize: 14 }}>
-              Đang tải danh sách hội thoại từ Server...
+          {isLoadingConversations ? (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: "#64748b", fontSize: 13 }}>
+              <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
+              <div>Đang tải danh sách hội thoại từ Server...</div>
+            </div>
+          ) : filteredConversations.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: "#64748b", fontSize: 13 }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>💬</div>
+              <div style={{ fontWeight: 600, color: "#334155", marginBottom: 6 }}>Chưa có hội thoại nào</div>
+              <p style={{ fontSize: 12, color: "#94a3b8", margin: "0 0 14px 0" }}>
+                Bấm nút bên dưới để trích xuất dữ liệu từ Zalo Web!
+              </p>
+              <button
+                onClick={handleTriggerLiveSync}
+                style={{
+                  padding: "8px 16px",
+                  background: "#0068ff",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 10,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                ⚡ Đồng bộ Hội thoại Zalo
+              </button>
             </div>
           ) : (
             filteredConversations.map((conv) => {
@@ -769,7 +899,7 @@ export default function ZaloMultiDeviceApp() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b" }}>{currentActiveConv.name}</div>
                 <div style={{ fontSize: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 4 }}>
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981" }}></span>
-                  Đang hoạt động (Singleton Multiplexed Hub)
+                  Đang hoạt động (Authenticated Media Streaming)
                 </div>
               </div>
             </div>
@@ -824,6 +954,10 @@ export default function ZaloMultiDeviceApp() {
           ) : (
             windowedMessages.map((m) => {
               const isMe = m.sender === "ME";
+              const mediaProxyUrl = m.mediaUrl && m.mediaUrl.startsWith("http") && !m.mediaUrl.startsWith(window.location.origin)
+                ? `/api/media/proxy?url=${encodeURIComponent(m.mediaUrl)}`
+                : m.mediaUrl;
+
               return (
                 <div
                   key={m.msgId}
@@ -847,28 +981,28 @@ export default function ZaloMultiDeviceApp() {
                       position: "relative",
                     }}
                   >
-                    {/* Media: Hình ảnh */}
-                    {m.mediaUrl && m.type === "IMAGE" && (
+                    {/* Media: Hình ảnh với Proxy & Lightbox Zoom */}
+                    {mediaProxyUrl && m.type === "IMAGE" && (
                       <img
-                        src={m.mediaUrl}
+                        src={mediaProxyUrl}
                         alt="Media Attachment"
-                        onClick={() => setPreviewImage(m.mediaUrl || null)}
+                        onClick={() => setPreviewImage(mediaProxyUrl)}
                         style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
                       />
                     )}
 
                     {/* Media: Video */}
-                    {m.mediaUrl && m.type === "VIDEO" && (
+                    {mediaProxyUrl && m.type === "VIDEO" && (
                       <video
                         controls
-                        src={m.mediaUrl}
+                        src={mediaProxyUrl}
                         style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
                       />
                     )}
 
-                    {/* Media: Audio */}
-                    {m.mediaUrl && m.type === "VOICE" && (
-                      <audio controls src={m.mediaUrl} style={{ width: "100%", marginBottom: 6 }} />
+                    {/* Media: Tin Nhắn Thoại Audio Voice Player */}
+                    {mediaProxyUrl && m.type === "VOICE" && (
+                      <AudioVoicePlayer src={mediaProxyUrl} isMe={isMe} />
                     )}
 
                     {/* Media: Tệp đính kèm */}
@@ -1011,13 +1145,13 @@ export default function ZaloMultiDeviceApp() {
             type="file"
             ref={fileInputRef}
             onChange={handleFileChange}
-            accept="image/*,video/*,.pdf,.doc,.docx"
+            accept="image/*,video/*,audio/*,.pdf,.doc,.docx"
             style={{ display: "none" }}
           />
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            title="Gửi ảnh / Tệp tin"
+            title="Gửi ảnh / Tệp tin / Âm thanh"
             style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "#64748b" }}
           >
             {uploading ? "⏳" : "📎"}
