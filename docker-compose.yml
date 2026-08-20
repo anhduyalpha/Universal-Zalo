@@ -1,27 +1,99 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
     container_name: universal_zalo_redis
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
+    networks:
+      - zalo_internal
 
   postgres:
     image: postgres:16-alpine
     container_name: universal_zalo_postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: zalo_admin
       POSTGRES_PASSWORD: zalo_secure_password
       POSTGRES_DB: universal_zalo
-    ports:
-      - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    networks:
+      - zalo_internal
+
+  zalo-proxy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.proxy
+    container_name: universal_zalo_proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9050:9050"
+    volumes:
+      - certs_data:/app/certs
+      - storage_data:/app/data
+    networks:
+      - zalo_internal
+
+  zalo-chromium:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.chromium
+    container_name: universal_zalo_chromium
+    restart: unless-stopped
+    depends_on:
+      - zalo-proxy
+    ports:
+      - "0.0.0.0:9222:9222"
+    volumes:
+      - certs_data:/app/certs:ro
+      - chrome_profile:/app/profile
+    environment:
+      PROXY_SERVER: socks5://zalo-proxy:9050
+      TARGET_URL: https://chat.zalo.me
+    networks:
+      - zalo_internal
+
+  gateway-hub:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gateway
+    container_name: universal_zalo_gateway
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+      - zalo-proxy
+    ports:
+      - "0.0.0.0:8080:8080"
+    volumes:
+      - storage_data:/app/data
+      - media_data:/app/data/media
+    networks:
+      - zalo_internal
+
+  web-client:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    container_name: universal_zalo_web
+    restart: unless-stopped
+    depends_on:
+      - gateway-hub
+    ports:
+      - "0.0.0.0:3000:3000"
+    networks:
+      - zalo_internal
+
+networks:
+  zalo_internal:
+    driver: bridge
 
 volumes:
   redis_data:
   pg_data:
+  certs_data:
+  storage_data:
+  media_data:
+  chrome_profile:
