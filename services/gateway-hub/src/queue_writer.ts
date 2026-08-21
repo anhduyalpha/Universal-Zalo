@@ -1,17 +1,18 @@
-import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
+import { serverStorage, StoredMessage, StoredConversation, StoredContact } from "./storage.js";
 import { cleanMessageContent, ParsedReaction, MentionToken } from "./normalizer.js";
 import EventEmitter from "events";
 
 export interface CdcEvent {
   op: "INSERT" | "UPDATE" | "DELETE";
-  table: "messages" | "conversations";
-  data: StoredMessage | StoredConversation;
+  table: "messages" | "conversations" | "contacts";
+  data: StoredMessage | StoredConversation | StoredContact;
   timestamp: number;
 }
 
 export interface IngestionMessageTask {
   msgId: string;
   conversationId: string;
+  senderId?: string;
   conversationName?: string;
   textContent: string;
   sender: "ME" | "OTHER";
@@ -28,38 +29,36 @@ export interface IngestionMessageTask {
   isRealtime?: boolean;
 }
 
+export interface OutboundMessageState {
+  clientMsgId: string;
+  targetId: string;
+  content: string;
+  status: "PENDING" | "DISPATCHED" | "SENT" | "FAILED";
+  createdAt: number;
+  timeoutTimer: NodeJS.Timeout;
+}
+
 /**
- * DUAL-TIER SINGLE-WRITER TRANSACTIONAL QUEUE & CDC ENGINE (Phase 3 Core Architecture)
- * - Tier 1: Real-Time High-Priority Queue (drained with 0ms latency)
- * - Tier 2: Bulk Historical Low-Priority Queue (processed in 500-item micro-batches)
- * - Deterministic Conversation Stubbing (prevents Foreign Key race conditions)
- * - Monotonic Causal Clock Guard (prevents older historical chunks from overwriting real-time updates)
- * - Change Data Capture (CDC) Event Stream over WebSocket
+ * 3NF DUAL-TIER SINGLE-WRITER & OUTBOUND LIFECYCLE ENGINE (Phases 1, 2, 3)
  */
 export class SingleWriterQueueEngine extends EventEmitter {
   private tier1RealtimeQueue: IngestionMessageTask[] = [];
   private tier2BulkQueue: IngestionMessageTask[] = [];
   private isProcessing = false;
   private idResolutionCache = new Map<string, string>(); // cliMsgId -> globalMsgId
-  private conversationStubs = new Set<string>();
+  private outboundPendingMap = new Map<string, OutboundMessageState>();
 
   constructor() {
     super();
     this.startWorkerLoop();
   }
 
-  /**
-   * Đẩy tin nhắn Real-time vào Hàng Đợi Ưu Tiên Cao (Tier 1)
-   */
   public enqueueRealtime(task: IngestionMessageTask) {
     task.isRealtime = true;
     this.tier1RealtimeQueue.push(task);
     this.triggerProcessing();
   }
 
-  /**
-   * Đẩy lô tin nhắn Bulk Sync vào Hàng Đợi Nền (Tier 2)
-   */
   public enqueueBulkBatch(tasks: IngestionMessageTask[]) {
     for (const t of tasks) {
       t.isRealtime = false;
@@ -68,13 +67,40 @@ export class SingleWriterQueueEngine extends EventEmitter {
     this.triggerProcessing();
   }
 
-  /**
-   * Đăng ký ánh xạ ID lạc quan (Optimistic cliMsgId -> Authoritative globalMsgId)
-   */
   public registerIdMapping(cliMsgId: string, globalMsgId: string) {
     if (cliMsgId && globalMsgId) {
-      this.idResolutionCache.set(cliMsgId, globalMsgId);
+      const strCli = String(cliMsgId);
+      const strGlobal = String(globalMsgId);
+      this.idResolutionCache.set(strCli, strGlobal);
+
+      // Giải phóng Outbound Pending nếu có
+      if (this.outboundPendingMap.has(strCli)) {
+        const out = this.outboundPendingMap.get(strCli)!;
+        clearTimeout(out.timeoutTimer);
+        out.status = "SENT";
+        this.outboundPendingMap.delete(strCli);
+        this.emit("outbound_status", { clientMsgId: strCli, status: "SENT", globalMsgId: strGlobal });
+      }
     }
+  }
+
+  public registerOutboundPending(clientMsgId: string, targetId: string, content: string) {
+    const strId = String(clientMsgId);
+    const timeoutTimer = setTimeout(() => {
+      if (this.outboundPendingMap.has(strId)) {
+        this.outboundPendingMap.delete(strId);
+        this.emit("outbound_status", { clientMsgId: strId, status: "FAILED", error: "Timeout waiting for server ACK (10s)" });
+      }
+    }, 10000);
+
+    this.outboundPendingMap.set(strId, {
+      clientMsgId: strId,
+      targetId: String(targetId),
+      content,
+      status: "PENDING",
+      createdAt: Date.now(),
+      timeoutTimer,
+    });
   }
 
   private triggerProcessing() {
@@ -86,19 +112,16 @@ export class SingleWriterQueueEngine extends EventEmitter {
 
   private async processNextBatch() {
     try {
-      // 1. Luôn rút cạn toàn bộ hàng đợi Real-time (Tier 1) trước
       while (this.tier1RealtimeQueue.length > 0) {
         const task = this.tier1RealtimeQueue.shift()!;
         await this.writeSingleMessage(task);
       }
 
-      // 2. Khi Tier 1 trống, xử lý micro-batch tối đa 500 mục từ Tier 2
       if (this.tier2BulkQueue.length > 0) {
         const microBatchSize = Math.min(500, this.tier2BulkQueue.length);
         const batch = this.tier2BulkQueue.splice(0, microBatchSize);
 
         for (const task of batch) {
-          // Nếu có tin nhắn real-time mới xuất hiện giữa chừng, ưu tiên ngắt để xử lý Tier 1 ngay
           if (this.tier1RealtimeQueue.length > 0) {
             const urgentTask = this.tier1RealtimeQueue.shift()!;
             await this.writeSingleMessage(urgentTask);
@@ -106,7 +129,6 @@ export class SingleWriterQueueEngine extends EventEmitter {
           await this.writeSingleMessage(task);
         }
 
-        // Lưu trạng thái xuống đĩa sau mỗi micro-batch
         serverStorage.flushToDisk();
       }
     } catch (err) {
@@ -121,36 +143,30 @@ export class SingleWriterQueueEngine extends EventEmitter {
     }
   }
 
-  /**
-   * Ghi 1 tin nhắn nguyên tử với Deterministic Stubbing & Monotonic Causal Consistency
-   */
   private async writeSingleMessage(task: IngestionMessageTask): Promise<StoredMessage | null> {
-    const convId = task.conversationId || "general";
-
-    // 1. Ánh xạ ID từ bảng phân giải cliMsgId -> globalMsgId
-    let finalMsgId = task.msgId;
+    const convId = String(task.conversationId || "general");
+    let finalMsgId = String(task.msgId);
     if (this.idResolutionCache.has(finalMsgId)) {
       finalMsgId = this.idResolutionCache.get(finalMsgId)!;
     }
 
-    // 2. Deterministic Conversation Stubbing (Chống lỗi Foreign Key Constraint / Orphaned Records)
-    const existingConvs = serverStorage.getConversations();
-    const convExists = existingConvs.some((c) => c.id === convId);
+    const senderId = String(task.senderId || (task.sender === "ME" ? "ME" : convId));
 
-    if (!convExists && !this.conversationStubs.has(convId)) {
+    // 1. Đảm bảo Parent Conversation tồn tại (3NF Deterministic Stubbing)
+    const existingConv = serverStorage.getConversation(convId);
+    if (!existingConv) {
+      const isGroup = convId.startsWith("g_") || (task.conversationName && task.conversationName.includes("Nhóm"));
       const stubConv: StoredConversation = {
         id: convId,
-        name: task.conversationName || `Hội thoại ${convId.substring(0, 8)}`,
+        name: task.conversationName || (isGroup ? `Nhóm ${convId.slice(-4)}` : `Hội thoại ${convId.slice(-4)}`),
         avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(task.conversationName || convId)}`,
-        type: (task.conversationName && task.conversationName.includes("Nhóm")) ? "GROUP" : "DIRECT",
+        type: isGroup ? "GROUP" : "DIRECT",
         lastMessage: task.textContent || `[${task.type || "Tin nhắn"}]`,
         lastTimestamp: task.timestamp || Date.now(),
         unreadCount: 0,
       };
       serverStorage.saveConversations([stubConv]);
-      this.conversationStubs.add(convId);
 
-      // Phát sự kiện CDC cho Conversation mới
       this.emitCdcEvent({
         op: "INSERT",
         table: "conversations",
@@ -159,16 +175,35 @@ export class SingleWriterQueueEngine extends EventEmitter {
       });
     }
 
-    // 3. Làm sạch dữ liệu và bóc tách reaction/emoticons/mentions
-    const cleaned = cleanMessageContent(task.textContent);
+    // 2. Đảm bảo Sender Contact tồn tại trong danh bạ (3NF Contact Normalization)
+    if (senderId && !serverStorage.getContact(senderId)) {
+      const stubContact: StoredContact = {
+        id: senderId,
+        displayName: task.senderName || (senderId === "ME" ? "Tôi" : `Thành viên ${senderId.slice(-4)}`),
+        avatarUrl: task.senderAvatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(senderId)}`,
+        isStub: true,
+        updatedAt: Date.now(),
+      };
+      serverStorage.saveContacts([stubContact]);
 
+      this.emitCdcEvent({
+        op: "INSERT",
+        table: "contacts",
+        data: stubContact,
+        timestamp: Date.now(),
+      });
+    }
+
+    // 3. Làm sạch và chuẩn hóa tin nhắn
+    const cleaned = cleanMessageContent(task.textContent);
     const messageData: StoredMessage = {
       msgId: finalMsgId,
       conversationId: convId,
-      textContent: cleaned.cleanText,
-      sender: task.sender,
+      senderId: senderId,
       senderName: task.senderName,
       senderAvatar: task.senderAvatar,
+      textContent: cleaned.cleanText,
+      sender: task.sender,
       status: task.status || "DELIVERED",
       timestamp: typeof task.timestamp === "number" ? task.timestamp : Date.now(),
       type: task.type || (task.mediaUrl ? "IMAGE" : "TEXT"),
@@ -179,10 +214,8 @@ export class SingleWriterQueueEngine extends EventEmitter {
       mentions: (task.mentions && task.mentions.length > 0) ? task.mentions : (cleaned.mentions.length > 0 ? cleaned.mentions : undefined),
     };
 
-    // 4. Ghi nguyên tử vào Server Storage với Monotonic Causal Check
     const saved = await serverStorage.addMessage(messageData);
 
-    // 5. Phát sự kiện Change Data Capture (CDC) đến các Client PWA
     this.emitCdcEvent({
       op: "INSERT",
       table: "messages",

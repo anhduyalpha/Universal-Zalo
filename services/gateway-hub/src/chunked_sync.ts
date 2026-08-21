@@ -1,5 +1,6 @@
 import { cdpClient } from "./cdp_client.js";
 import { singleWriterQueue, IngestionMessageTask } from "./queue_writer.js";
+import { serverStorage } from "./storage.js";
 import fs from "fs";
 import path from "path";
 
@@ -14,10 +15,10 @@ export interface SyncCursorState {
 }
 
 /**
- * CHUNKED PAGINATED HISTORICAL SYNC ENGINE (Phase 1 Core Architecture)
+ * 3NF CHUNKED PAGINATED HISTORICAL SYNC ENGINE (Phases 1 & 2)
  * - IDBCursor Bounded Batch Pagination (500 items per chunk)
- * - Backpressure via Runtime Binding: emitZaloChunk -> Node.js ACK -> cursor.continue()
- * - Deterministic Cursor Checkpointing (prevents full rescans after crashes)
+ * - String ID Sanitization (tránh tràn số 64-bit IEEE 754)
+ * - Decoupled Container vs Author Scope Routing
  */
 export class ChunkedSyncEngine {
   private cursors: Record<string, SyncCursorState> = {};
@@ -43,7 +44,7 @@ export class ChunkedSyncEngine {
   }
 
   public getCursor(convId: string): SyncCursorState {
-    return this.cursors[convId] || {
+    return this.cursors[String(convId)] || {
       lastSyncTimestamp: 0,
       totalSynced: 0,
       status: "IDLE",
@@ -51,21 +52,19 @@ export class ChunkedSyncEngine {
   }
 
   public updateCursor(convId: string, patch: Partial<SyncCursorState>) {
-    this.cursors[convId] = {
-      ...this.getCursor(convId),
+    const strId = String(convId);
+    this.cursors[strId] = {
+      ...this.getCursor(strId),
       ...patch,
       lastSyncTimestamp: Date.now(),
     };
     this.saveCursors();
   }
 
-  /**
-   * Thực thi trích xuất lịch sử phân đoạn an toàn (Bounded Cursor Sync)
-   */
   public async executeChunkedSync(
     onProgress?: (percent: number, log: string) => void
   ): Promise<{ totalMessages: number; totalConversations: number }> {
-    console.log("⚡ [Chunked Sync] Starting bounded IDBCursor sync across IndexedDB stores...");
+    console.log("⚡ [Chunked Sync] Starting 3NF bounded IDBCursor sync...");
 
     const script = `
       (async () => {
@@ -87,7 +86,6 @@ export class ChunkedSyncEngine {
 
               const storeNames = Array.from(db.objectStoreNames);
               for (const storeName of storeNames) {
-                // Chỉ quét các store chứa messages
                 if (storeName.includes('msg') || storeName.includes('message') || storeName.includes('chat') || storeName.includes('history')) {
                   try {
                     await new Promise((resolve) => {
@@ -106,11 +104,21 @@ export class ChunkedSyncEngine {
                             const rawMsg = val.message || val.content || val.text || val.msgBody || val.data;
                             const msgId = val.msgId || val.globalMsgId || val.id || val.cliMsgId;
                             if (msgId && (rawMsg || val.mediaUrl || val.url)) {
+                              const isMe = Boolean(val.isMe || val.fromMe || val.senderType === 1);
+                              const isGroup = Boolean(val.grid || (val.threadId && String(val.threadId).startsWith('g_')));
+                              const convId = isGroup 
+                                ? String(val.grid || val.threadId)
+                                : String(val.uid || val.threadId || val.toId || "general");
+                              const senderId = isMe ? "ME" : String(val.fromUid || val.fromId || val.uid || convId);
+
                               batch.push({
                                 msgId: String(msgId),
-                                conversationId: String(val.threadId || val.convId || val.toId || "general"),
+                                conversationId: convId,
+                                senderId: senderId,
+                                senderName: val.senderName || val.displayName || val.name,
+                                senderAvatar: val.avatar || val.senderAvatar,
                                 textContent: typeof rawMsg === 'string' ? rawMsg : JSON.stringify(rawMsg),
-                                sender: (val.isMe || val.fromMe || val.senderType === 1) ? "ME" : "OTHER",
+                                sender: isMe ? "ME" : "OTHER",
                                 timestamp: Number(val.timestamp || val.ts || val.sendTime) || Date.now(),
                                 type: val.msgType || val.type || (val.mediaUrl ? "IMAGE" : "TEXT"),
                                 mediaUrl: val.mediaUrl || val.url || null,
@@ -120,7 +128,6 @@ export class ChunkedSyncEngine {
 
                           if (batch.length >= BATCH_LIMIT) {
                             summary.totalMessages += batch.length;
-                            // Gửi chunk qua Native Binding và yield execution để không khóa V8
                             if (typeof window.emitZaloChunk === 'function') {
                               window.emitZaloChunk(JSON.stringify({ store: storeName, chunk: batch }));
                             }
@@ -129,7 +136,6 @@ export class ChunkedSyncEngine {
 
                           cursor.continue();
                         } else {
-                          // Rút nốt phần còn lại của store
                           if (batch.length > 0) {
                             summary.totalMessages += batch.length;
                             if (typeof window.emitZaloChunk === 'function') {
@@ -155,19 +161,21 @@ export class ChunkedSyncEngine {
       })()
     `;
 
-    // Thiết lập listener cho chunk binding
     const chunkHandler = (payload: { name: string; payload: string }) => {
       if (payload.name === "emitZaloChunk") {
         try {
           const data = JSON.parse(payload.payload);
           if (data && Array.isArray(data.chunk)) {
             const tasks: IngestionMessageTask[] = data.chunk.map((item: any) => ({
-              msgId: item.msgId,
-              conversationId: item.conversationId,
+              msgId: String(item.msgId),
+              conversationId: String(item.conversationId),
+              senderId: String(item.senderId),
+              senderName: item.senderName,
+              senderAvatar: item.senderAvatar,
               textContent: item.textContent,
               sender: item.sender,
               status: "DELIVERED",
-              timestamp: item.timestamp,
+              timestamp: Number(item.timestamp) || Date.now(),
               type: item.type,
               mediaUrl: item.mediaUrl,
             }));
@@ -187,7 +195,7 @@ export class ChunkedSyncEngine {
       });
 
       const result = evalRes?.result?.value || { totalMessages: 0, totalConversations: 0 };
-      onProgress?.(100, `✅ Đã trích xuất ${result.totalMessages} tin nhắn theo cơ chế bounded cursors.`);
+      onProgress?.(100, `✅ Đã trích xuất ${result.totalMessages} tin nhắn chuẩn 3NF.`);
       return result;
     } finally {
       cdpClient.removeListener("binding_called", chunkHandler);

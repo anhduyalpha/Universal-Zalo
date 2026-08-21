@@ -3,112 +3,140 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   db,
-  Conversation,
   LocalMessage,
-  seedInitialConversations,
+  Conversation,
+  Contact,
   deduplicateById,
-  deduplicateConversationsByName,
+  MessageReaction,
   MentionToken,
-} from "../lib/dexie_db";
+} from "@/lib/dexie_db";
 import { useLiveQuery } from "dexie-react-hooks";
-import { nanoid } from "nanoid";
 import Link from "next/link";
+import { nanoid } from "nanoid";
 
-// 1. Component Avatar chống lỗi 404 / CORS với phong cách Dark Pro
+// ==========================================
+// 1. HELPER COMPONENTS & RENDERERS
+// ==========================================
+
 function AvatarWithFallback({
   name,
   src,
-  size = 42,
+  size = 40,
+  isGroup = false,
+  contactId,
 }: {
   name: string;
   src?: string;
   size?: number;
+  isGroup?: boolean;
+  contactId?: string;
 }) {
   const [hasError, setHasError] = useState(false);
   const cleanName = (name || "Zalo").trim();
   const initial = cleanName.charAt(0).toUpperCase() || "Z";
 
-  const colors = [
-    "#10b981", "#059669", "#0068ff", "#6366f1",
-    "#8b5cf6", "#ec4899", "#f59e0b", "#06b6d4"
-  ];
+  // Proxy avatar thông qua Gateway Hub để tránh lỗi 403 CDN Hotlink & hết hạn Token
+  const effectiveSrc = useMemo(() => {
+    if (contactId && !hasError) {
+      return `/api/media/avatar?id=${encodeURIComponent(contactId)}&name=${encodeURIComponent(cleanName)}`;
+    }
+    if (src && !hasError && !src.includes("dicebear")) {
+      if (src.startsWith("http") && !src.startsWith(window.location.origin)) {
+        return `/api/media/proxy?url=${encodeURIComponent(src)}&name=${encodeURIComponent(cleanName)}`;
+      }
+      return src;
+    }
+    return null;
+  }, [src, hasError, cleanName, contactId]);
+
+  if (effectiveSrc && !hasError) {
+    return (
+      <img
+        src={effectiveSrc}
+        alt={cleanName}
+        onError={() => setHasError(true)}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: isGroup ? 12 : "50%",
+          objectFit: "cover",
+          flexShrink: 0,
+          border: "1px solid rgba(255,255,255,0.1)",
+        }}
+      />
+    );
+  }
+
+  const colors = ["#0068ff", "#10b981", "#8b5cf6", "#f59e0b", "#ec4899", "#3b82f6", "#06b6d4"];
   let hash = 0;
   for (let i = 0; i < cleanName.length; i++) {
     hash = cleanName.charCodeAt(i) + ((hash << 5) - hash);
   }
-  const bgColor = colors[Math.abs(hash) % colors.length];
-
-  if (!src || hasError) {
-    return (
-      <div
-        style={{
-          width: size,
-          height: size,
-          borderRadius: "50%",
-          background: bgColor,
-          color: "#ffffff",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontWeight: 700,
-          fontSize: Math.round(size * 0.42),
-          flexShrink: 0,
-          boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-          userSelect: "none",
-        }}
-      >
-        {initial}
-      </div>
-    );
-  }
-
-  const finalSrc = src.startsWith("http") && typeof window !== "undefined" && !src.startsWith(window.location.origin)
-    ? `/api/media/proxy?url=${encodeURIComponent(src)}&name=${encodeURIComponent(cleanName)}`
-    : src;
+  const bg = colors[Math.abs(hash) % colors.length];
 
   return (
-    <img
-      src={finalSrc}
-      alt={cleanName}
-      onError={() => setHasError(true)}
+    <div
       style={{
         width: size,
         height: size,
-        borderRadius: "50%",
-        objectFit: "cover",
+        borderRadius: isGroup ? 12 : "50%",
+        background: bg,
+        color: "#ffffff",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontWeight: 800,
+        fontSize: size * 0.42,
         flexShrink: 0,
-        boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
-        border: "1px solid rgba(255,255,255,0.1)",
+        border: "1px solid rgba(255,255,255,0.15)",
+        boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
       }}
-    />
+    >
+      {initial}
+    </div>
   );
 }
 
-// 2. Component Phát Tin Nhắn Thoại (Audio Voice Player - Dark Theme)
 function AudioVoicePlayer({ src, isMe }: { src: string; isMe: boolean }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-
-  const finalSrc = src.startsWith("http") && typeof window !== "undefined" && !src.startsWith(window.location.origin)
-    ? `/api/media/proxy?url=${encodeURIComponent(src)}`
-    : src;
 
   const togglePlay = () => {
     if (!audioRef.current) return;
     if (isPlaying) {
       audioRef.current.pause();
+      setIsPlaying(false);
     } else {
-      audioRef.current.play().catch(() => {});
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
     }
-    setIsPlaying(!isPlaying);
   };
 
-  const formatTime = (sec: number) => {
-    if (isNaN(sec)) return "0:00";
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
+  const handleTimeUpdate = () => {
+    if (audioRef.current) {
+      setCurrentTime(audioRef.current.currentTime);
+    }
+  };
+
+  const handleLoadedMetadata = () => {
+    if (audioRef.current) {
+      setDuration(audioRef.current.duration || 0);
+    }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    if (audioRef.current) {
+      audioRef.current.currentTime = val;
+      setCurrentTime(val);
+    }
+  };
+
+  const formatTime = (secs: number) => {
+    if (isNaN(secs) || secs < 0) return "0:00";
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
     return `${m}:${s < 10 ? "0" : ""}${s}`;
   };
 
@@ -118,20 +146,22 @@ function AudioVoicePlayer({ src, isMe }: { src: string; isMe: boolean }) {
         display: "flex",
         alignItems: "center",
         gap: 10,
-        padding: "10px 14px",
-        background: isMe ? "rgba(255,255,255,0.12)" : "rgba(15, 23, 42, 0.6)",
-        borderRadius: 24,
-        marginBottom: 6,
+        padding: "8px 12px",
+        background: isMe ? "rgba(255,255,255,0.15)" : "rgba(15, 23, 42, 0.6)",
+        borderRadius: 14,
         minWidth: 220,
-        border: "1px solid rgba(255,255,255,0.08)",
+        maxWidth: 280,
+        marginBottom: 4,
+        border: "1px solid rgba(255,255,255,0.1)",
       }}
     >
       <audio
         ref={audioRef}
-        src={finalSrc}
-        onTimeUpdate={() => audioRef.current && setCurrentTime(audioRef.current.currentTime)}
-        onLoadedMetadata={() => audioRef.current && setDuration(audioRef.current.duration)}
+        src={src}
+        onTimeUpdate={handleTimeUpdate}
+        onLoadedMetadata={handleLoadedMetadata}
         onEnded={() => setIsPlaying(false)}
+        preload="metadata"
       />
       <button
         type="button"
@@ -141,35 +171,36 @@ function AudioVoicePlayer({ src, isMe }: { src: string; isMe: boolean }) {
           height: 34,
           borderRadius: "50%",
           background: isMe ? "#ffffff" : "#10b981",
-          color: isMe ? "#0f172a" : "#ffffff",
+          color: isMe ? "#0068ff" : "#ffffff",
           border: "none",
-          cursor: "pointer",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
+          cursor: "pointer",
           fontSize: 14,
+          fontWeight: "bold",
           flexShrink: 0,
-          boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+          boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
         }}
       >
-        {isPlaying ? "⏸️" : "▶️"}
+        {isPlaying ? "⏸" : "▶"}
       </button>
 
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 3 }}>
         <input
           type="range"
           min={0}
           max={duration || 100}
           value={currentTime}
-          onChange={(e) => {
-            if (audioRef.current) {
-              audioRef.current.currentTime = Number(e.target.value);
-              setCurrentTime(Number(e.target.value));
-            }
+          onChange={handleSeek}
+          style={{
+            width: "100%",
+            accentColor: isMe ? "#ffffff" : "#10b981",
+            cursor: "pointer",
+            height: 4,
           }}
-          style={{ width: "100%", height: 4, accentColor: isMe ? "#ffffff" : "#10b981", cursor: "pointer" }}
         />
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: isMe ? "#e2e8f0" : "#94a3b8" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, opacity: 0.8, color: isMe ? "#ffffff" : "#94a3b8" }}>
           <span>{formatTime(currentTime)}</span>
           <span>{formatTime(duration)}</span>
         </div>
@@ -178,7 +209,6 @@ function AudioVoicePlayer({ src, isMe }: { src: string; isMe: boolean }) {
   );
 }
 
-// 3. Component Render Nội dung tin nhắn (hỗ trợ @mentions và link clickable)
 function MessageContentRenderer({
   text,
   mentions,
@@ -190,65 +220,35 @@ function MessageContentRenderer({
 }) {
   if (!text) return null;
 
-  const URL_REGEX = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
-  const parts = text.split(URL_REGEX);
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const parts = text.split(urlRegex);
 
   return (
-    <div style={{ fontSize: 13.5, lineHeight: 1.55, wordBreak: "break-word", color: isMe ? "#ffffff" : "#f1f5f9" }}>
-      {parts.map((part, idx) => {
-        if (part.match(URL_REGEX)) {
-          const href = part.startsWith("http") ? part : `https://${part}`;
+    <div style={{ wordBreak: "break-word", lineHeight: 1.5, fontSize: 13.5 }}>
+      {parts.map((part, i) => {
+        if (part.match(urlRegex)) {
           return (
             <a
-              key={idx}
-              href={href}
+              key={i}
+              href={part}
               target="_blank"
               rel="noopener noreferrer"
               style={{
-                color: isMe ? "#93c5fd" : "#38bdf8",
+                color: isMe ? "#ffffff" : "#38bdf8",
                 textDecoration: "underline",
-                wordBreak: "break-all",
+                fontWeight: 600,
               }}
             >
               {part}
             </a>
           );
         }
-
-        const mentionMatch = part.match(/@[a-zA-Z0-9_\-\.\s\u00C0-\u024F\u1E00-\u1EFF]+/g);
-        if (mentionMatch) {
-          return (
-            <span key={idx}>
-              {part.split(/(@[a-zA-Z0-9_\-\.\s\u00C0-\u024F\u1E00-\u1EFF]+)/g).map((subPart, subIdx) => {
-                if (subPart.startsWith("@")) {
-                  return (
-                    <span
-                      key={subIdx}
-                      style={{
-                        color: "#38bdf8",
-                        fontWeight: 700,
-                        background: "rgba(56, 189, 248, 0.15)",
-                        padding: "1px 6px",
-                        borderRadius: 4,
-                      }}
-                    >
-                      {subPart}
-                    </span>
-                  );
-                }
-                return subPart;
-              })}
-            </span>
-          );
-        }
-
-        return <span key={idx}>{part}</span>;
+        return <span key={i}>{part}</span>;
       })}
     </div>
   );
 }
 
-// 4. Component Tệp đính kèm (File Attachment Card)
 function FileAttachmentCard({
   name,
   size,
@@ -257,23 +257,19 @@ function FileAttachmentCard({
 }: {
   name?: string;
   size?: number;
-  url?: string;
+  url: string;
   isMe: boolean;
 }) {
   const formatSize = (bytes?: number) => {
     if (!bytes) return "Tệp đính kèm";
     if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1048576).toFixed(1)} MB`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
-
-  const finalUrl = url && url.startsWith("http") && typeof window !== "undefined" && !url.startsWith(window.location.origin)
-    ? `/api/media/proxy?url=${encodeURIComponent(url)}`
-    : (url || "#");
 
   return (
     <a
-      href={finalUrl}
+      href={url}
       target="_blank"
       rel="noopener noreferrer"
       style={{
@@ -301,6 +297,10 @@ function FileAttachmentCard({
   );
 }
 
+// ==========================================
+// 2. MAIN APPLICATION COMPONENT
+// ==========================================
+
 export default function ZChatDeskApp() {
   const [activeConvId, setActiveConvId] = useState<string>("general");
   const [filterType, setFilterType] = useState<"ALL" | "DIRECT" | "GROUP">("ALL");
@@ -318,6 +318,13 @@ export default function ZChatDeskApp() {
   const [visibleMessageCount, setVisibleMessageCount] = useState(60);
   const [viewportHeight, setViewportHeight] = useState<string>("100dvh");
   const [isLoadingConversations, setIsLoadingConversations] = useState(true);
+
+  // Hydration Gatekeeper State
+  const [hydrationState, setHydrationState] = useState<{
+    state: "COLD_START" | "STAGING_INGESTION" | "INTEGRITY_CHECK" | "HYDRATED";
+    progress: number;
+    message: string;
+  }>({ state: "HYDRATED", progress: 100, message: "" });
 
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -341,9 +348,12 @@ export default function ZChatDeskApp() {
     }
   }, []);
 
-  // Lấy dữ liệu từ IndexedDB (Dexie) và khử trùng lặp
+  // Lấy dữ liệu từ IndexedDB (Dexie 3NF Model)
   const rawConversations = useLiveQuery(() => db.conversations.toArray(), []) || [];
-  const localConversations = deduplicateConversationsByName(rawConversations);
+  const localConversations = deduplicateById(rawConversations);
+
+  const rawContacts = useLiveQuery(() => db.contacts.toArray(), []) || [];
+  const contactMap = useMemo(() => new Map(rawContacts.map((c) => [c.id, c])), [rawContacts]);
 
   const rawMessages = useLiveQuery(
     () => db.messages.where("conversationId").equals(activeConvId).sortBy("timestamp"),
@@ -403,6 +413,16 @@ export default function ZChatDeskApp() {
           }
         }
       }
+
+      const resContacts = await fetch("/api/contacts");
+      if (resContacts.ok) {
+        const liveContacts: Contact[] = await resContacts.json();
+        if (Array.isArray(liveContacts) && liveContacts.length > 0) {
+          for (const ct of liveContacts) {
+            try { await db.contacts.put(ct); } catch {}
+          }
+        }
+      }
     } catch (e) {
       console.warn("Failed to fetch live conversations:", e);
     } finally {
@@ -423,6 +443,9 @@ export default function ZChatDeskApp() {
               await db.messages.put({
                 msgId: msg.msgId,
                 conversationId: msg.conversationId || convId,
+                senderId: msg.senderId || (msg.sender === "ME" ? "ME" : convId),
+                senderName: msg.senderName,
+                senderAvatar: msg.senderAvatar,
                 textContent: msg.textContent,
                 sender: msg.sender,
                 status: msg.status || "DELIVERED",
@@ -457,236 +480,268 @@ export default function ZChatDeskApp() {
     }
   };
 
+  // Kích hoạt SSE Hydration Status Listener
   useEffect(() => {
-    if (activeConvId && currentActiveConv) {
-      fetchServerMessages(activeConvId, currentActiveConv.name);
-    }
-  }, [activeConvId]);
-
-  // Khởi tạo WebSocket Gateway Hub & Seed bảo vệ
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      seedInitialConversations().then(() => {
-        fetchLiveConversations();
-      });
-
-      const loadingTimeout = setTimeout(() => {
-        setIsLoadingConversations(false);
-      }, 2000);
-
-      const hostname = window.location.hostname || "127.0.0.1";
-      const wsUrl = `ws://${hostname}:8080`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => setWsStatus("CONNECTED");
-      ws.onclose = () => setWsStatus("DISCONNECTED");
-
-      ws.onmessage = async (event) => {
+    let evtSource: EventSource | null = null;
+    try {
+      evtSource = new EventSource("/api/sync/status");
+      evtSource.onmessage = (e) => {
         try {
-          const data = JSON.parse(event.data);
+          const data = JSON.parse(e.data);
+          if (data && data.state) {
+            setHydrationState(data);
+          }
+        } catch (err) {}
+      };
+    } catch (err) {}
 
-          if (data.event === "LIVE_SYNC_PROGRESS") {
-            setSyncPercent(data.percent || 0);
-            setSyncCurrentName(data.currentName || "");
-            if (data.log) {
-              setSyncLogs((prev) => [...prev, data.log]);
+    return () => {
+      evtSource?.close();
+    };
+  }, []);
+
+  // WebSocket Connection & Real-time Listeners
+  useEffect(() => {
+    fetchLiveConversations();
+    const timer = setTimeout(() => {
+      setIsLoadingConversations(false);
+    }, 2000);
+
+    const hostname = window.location.hostname || "127.0.0.1";
+    const wsUrl = `ws://${hostname}:8080`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => setWsStatus("CONNECTED");
+    ws.onclose = () => setWsStatus("DISCONNECTED");
+
+    ws.onmessage = async (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.event === "LIVE_SYNC_PROGRESS") {
+          setSyncPercent(data.percent || 0);
+          setSyncCurrentName(data.currentName || "");
+          if (data.log) {
+            setSyncLogs((prev) => [...prev, data.log]);
+          }
+        }
+
+        if (data.event === "LIVE_SYNC_COMPLETED") {
+          setSyncPercent(100);
+          setSyncLogs((prev) => [...prev, "🎉 Đã hoàn tất đối soát và tráo đổi Staging sang Production!"]);
+          if (data.dumpResult?.conversations && data.dumpResult?.messagesByConversation) {
+            await db.reconcileFullState(
+              data.dumpResult.conversations,
+              data.dumpResult.messagesByConversation,
+              data.dumpResult.contacts || []
+            );
+          }
+          setIsLoadingConversations(false);
+          setTimeout(() => {
+            setIsFullSyncing(false);
+          }, 1500);
+        }
+
+        if (data.event === "OUTBOUND_STATUS_UPDATE") {
+          if (data.clientMsgId) {
+            const msg = await db.messages.get(data.clientMsgId);
+            if (msg) {
+              await db.messages.update(data.clientMsgId, {
+                status: data.status === "SENT" ? "DELIVERED" : "FAILED",
+              });
             }
           }
+        }
 
-          if (data.event === "LIVE_SYNC_COMPLETED") {
-            setSyncPercent(100);
-            setSyncLogs((prev) => [...prev, "🎉 Đã hoàn tất đồng bộ toàn diện vào cơ sở dữ liệu!"]);
-            if (data.dumpResult?.conversations && data.dumpResult?.messagesByConversation) {
-              await db.reconcileFullState(data.dumpResult.conversations, data.dumpResult.messagesByConversation);
-            }
-            setIsLoadingConversations(false);
-            setTimeout(() => {
-              setIsFullSyncing(false);
-            }, 1500);
-          }
-
-          if (data.event === "CDC_EVENT") {
-            if (data.table === "messages" && data.data) {
-              const msg = data.data;
-              try {
-                await db.messages.put({
-                  msgId: msg.msgId,
-                  conversationId: msg.conversationId,
-                  textContent: msg.textContent,
-                  sender: msg.sender,
-                  status: msg.status || "DELIVERED",
-                  timestamp: msg.timestamp || Date.now(),
-                  type: msg.type || "TEXT",
-                  mediaUrl: msg.mediaUrl,
-                  mediaName: msg.mediaName,
-                  mediaSize: msg.mediaSize,
-                  reactions: msg.reactions,
-                  mentions: msg.mentions,
-                });
-                await db.conversations.update(msg.conversationId, {
-                  lastMessage: msg.textContent || `[${msg.type || "Media"}]`,
-                  lastTimestamp: msg.timestamp || Date.now(),
-                });
-              } catch {}
-            } else if (data.table === "conversations" && data.data) {
-              const conv = data.data;
-              try {
-                await db.conversations.put(conv);
-              } catch {}
-            }
-          }
-
-          if (data.event === "MESSAGE_FANOUT") {
-            const convId = data.conversationId || activeConvId || "general";
+        if (data.event === "CDC_EVENT") {
+          if (data.table === "messages" && data.data) {
+            const msg = data.data;
             try {
               await db.messages.put({
-                msgId: data.msgId,
-                conversationId: convId,
-                textContent: data.textContent,
-                sender: data.sender || "OTHER",
-                status: "DELIVERED",
-                timestamp: data.hlc?.physicalTime || Date.now(),
-                type: data.type || "TEXT",
-                mediaUrl: data.mediaUrl,
-                mediaName: data.mediaName,
-                mediaSize: data.mediaSize,
-                reactions: data.reactions,
-                mentions: data.mentions,
+                msgId: msg.msgId,
+                conversationId: msg.conversationId,
+                senderId: msg.senderId || (msg.sender === "ME" ? "ME" : msg.conversationId),
+                senderName: msg.senderName,
+                senderAvatar: msg.senderAvatar,
+                textContent: msg.textContent,
+                sender: msg.sender,
+                status: msg.status || "DELIVERED",
+                timestamp: msg.timestamp || Date.now(),
+                type: msg.type || "TEXT",
+                mediaUrl: msg.mediaUrl,
+                mediaName: msg.mediaName,
+                mediaSize: msg.mediaSize,
+                reactions: msg.reactions,
+                mentions: msg.mentions,
               });
-
-              await db.conversations.update(convId, {
-                lastMessage: data.textContent || `[${data.type || "Media"}]`,
-                lastTimestamp: Date.now(),
+              await db.conversations.update(msg.conversationId, {
+                lastMessage: msg.textContent || `[${msg.type || "Media"}]`,
+                lastTimestamp: msg.timestamp || Date.now(),
               });
             } catch {}
+          } else if (data.table === "conversations" && data.data) {
+            try {
+              await db.conversations.put(data.data);
+            } catch {}
+          } else if (data.table === "contacts" && data.data) {
+            try {
+              await db.contacts.put(data.data);
+            } catch {}
           }
-        } catch (e) {
-          console.error("Failed to parse websocket frame:", e);
         }
-      };
 
-      const timer = setInterval(fetchLiveConversations, 10000);
+        if (data.event === "MESSAGE_FANOUT") {
+          const convId = data.conversationId || activeConvId || "general";
+          try {
+            await db.messages.put({
+              msgId: data.msgId,
+              conversationId: convId,
+              senderId: data.senderId || (data.sender === "ME" ? "ME" : convId),
+              senderName: data.senderName,
+              senderAvatar: data.senderAvatar,
+              textContent: data.textContent,
+              sender: data.sender || "OTHER",
+              status: "DELIVERED",
+              timestamp: data.hlc?.physicalTime || Date.now(),
+              type: data.type || "TEXT",
+              mediaUrl: data.mediaUrl,
+              mediaName: data.mediaName,
+              mediaSize: data.mediaSize,
+              reactions: data.reactions,
+              mentions: data.mentions,
+            });
 
-      return () => {
-        clearTimeout(loadingTimeout);
-        clearInterval(timer);
-        ws.close();
-      };
+            await db.conversations.update(convId, {
+              lastMessage: data.textContent || `[${data.type || "Media"}]`,
+              lastTimestamp: Date.now(),
+            });
+          } catch {}
+        }
+      } catch (e) {
+        console.error("Failed to parse websocket frame:", e);
+      }
+    };
+
+    const intervalTimer = setInterval(fetchLiveConversations, 10000);
+
+    return () => {
+      clearTimeout(timer);
+      clearInterval(intervalTimer);
+      ws.close();
+    };
+  }, []);
+
+  const handleSendMessage = async (retryText?: string, retryMsgId?: string) => {
+    const textToSend = retryText || inputText;
+    if (!textToSend.trim()) return;
+
+    const clientMsgId = retryMsgId || nanoid();
+    const targetId = activeConvId || "general";
+
+    // 1. Optimistic Local Insert (SENDING)
+    await db.messages.put({
+      msgId: clientMsgId,
+      conversationId: targetId,
+      senderId: "ME",
+      textContent: textToSend,
+      sender: "ME",
+      status: "SENDING",
+      timestamp: Date.now(),
+      type: "TEXT",
+    });
+
+    if (!retryText) {
+      setInputText("");
     }
-  }, [activeConvId]);
 
-  // Gửi tin nhắn Text
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputText.trim()) return;
-
-    const tempMsgId = nanoid();
-    const now = Date.now();
-    const targetConvId = activeConvId || "general";
-
-    try {
-      await db.messages.put({
-        msgId: tempMsgId,
-        conversationId: targetConvId,
-        textContent: inputText,
-        sender: "ME",
-        status: "SENDING",
-        timestamp: now,
-        type: "TEXT",
-      });
-
-      await db.conversations.update(targetConvId, {
-        lastMessage: `Bạn: ${inputText}`,
-        lastTimestamp: now,
-      });
-    } catch {}
-
+    // 2. Dispatch qua Headless WebSocket/API
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: "SEND_MESSAGE",
-          conversationId: targetConvId,
-          conversationName: currentActiveConv?.name,
-          textContent: inputText,
-          idempotencyKey: tempMsgId,
+          targetId: targetId,
+          conversationId: targetId,
+          clientMsgId,
+          textContent: textToSend,
         })
       );
+    } else {
+      // Fallback sang REST API
+      fetch("/api/outbound/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetId, content: textToSend, clientMsgId }),
+      }).catch(() => {});
     }
-
-    setInputText("");
   };
 
-  // Upload Ảnh / Media
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setUploading(true);
-    const targetConvId = activeConvId || "general";
-
     try {
       const reader = new FileReader();
       reader.onload = async () => {
-        const base64Data = reader.result as string;
-        const res = await fetch("/api/upload", {
+        const base64 = reader.result as string;
+        const res = await fetch("/api/outbound/media", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            data: base64Data,
+            targetId: activeConvId,
+            conversationId: activeConvId,
             filename: file.name,
-            conversationId: targetConvId,
-            caption: inputText,
+            data: base64,
           }),
         });
 
         if (res.ok) {
-          const result = await res.json();
-          if (result.message) {
-            try {
-              await db.messages.put({
-                msgId: result.message.msgId,
-                conversationId: targetConvId,
-                textContent: result.message.textContent,
-                sender: "ME",
-                status: "DELIVERED",
-                timestamp: Date.now(),
-                type: file.type.startsWith("image/") ? "IMAGE" : (file.type.startsWith("audio/") ? "VOICE" : "FILE"),
-                mediaUrl: result.message.mediaUrl,
-                mediaName: file.name,
-                mediaSize: file.size,
-              });
-            } catch {}
-          }
+          const json = await res.json();
+          await db.messages.put({
+            msgId: json.msgId || nanoid(),
+            conversationId: activeConvId,
+            senderId: "ME",
+            textContent: "",
+            sender: "ME",
+            status: "DELIVERED",
+            timestamp: Date.now(),
+            type: "IMAGE",
+            mediaUrl: json.url,
+            mediaName: file.name,
+            mediaSize: file.size,
+          });
         }
         setUploading(false);
-        setInputText("");
       };
       reader.readAsDataURL(file);
-    } catch (err) {
+    } catch (e) {
       setUploading(false);
     }
   };
 
-  // KÍCH HOẠT ĐỒNG BỘ TOÀN DIỆN KHÔNG GIỚI HẠN
   const handleTriggerLiveSync = () => {
     setIsFullSyncing(true);
     setShowSyncModal(true);
     setSyncPercent(5);
-    setSyncLogs(["🚀 Bắt đầu quá trình đồng bộ toàn diện Unbounded Zalo Engine..."]);
+    setSyncLogs(["🚀 Đang mở phiên Blue/Green Staging & trích xuất toàn bộ dữ liệu..."]);
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "START_LIVE_SYNC" }));
     } else {
       fetch("/api/sync/full-resync", { method: "POST" })
         .then((res) => res.json())
-        .then(async (dumpResult) => {
+        .then((dumpResult) => {
           if (dumpResult?.conversations && dumpResult?.messagesByConversation) {
-            await db.reconcileFullState(dumpResult.conversations, dumpResult.messagesByConversation);
-            setSyncLogs((prev) => [...prev, `✅ Đã lưu ${dumpResult.totalConversations} hội thoại & ${dumpResult.totalMessages} tin nhắn!`]);
-            setSyncPercent(100);
-            setTimeout(() => setIsFullSyncing(false), 2000);
+            db.reconcileFullState(
+              dumpResult.conversations,
+              dumpResult.messagesByConversation,
+              dumpResult.contacts || []
+            );
           }
+          setSyncPercent(100);
+          setSyncLogs((prev) => [...prev, "🎉 Hoàn tất đồng bộ toàn diện!"]);
+          setTimeout(() => setIsFullSyncing(false), 1500);
         })
         .catch((err) => {
           setSyncLogs((prev) => [...prev, `❌ Lỗi: ${err.message}`]);
@@ -699,80 +754,135 @@ export default function ZChatDeskApp() {
     <div
       style={{
         display: "flex",
-        height: viewportHeight,
         width: "100vw",
-        overflow: "hidden",
-        background: "#090d16",
+        height: viewportHeight,
+        background: "#080c14",
         color: "#f8fafc",
-        fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
-        overscrollBehaviorY: "none",
-        boxSizing: "border-box",
+        fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+        overflow: "hidden",
+        position: "fixed",
+        top: 0,
+        left: 0,
       }}
     >
       {/* ========================================================================= */}
-      {/* 1. THANH ĐIỀU HƯỚNG DỌC (CỘT 1 - FAR-LEFT ICON NAVBAR)                    */}
+      {/* 0. HYDRATION GATEKEEPER MODAL (Phase 2 Offline-First Pre-Fetch Screen)     */}
+      {/* ========================================================================= */}
+      {hydrationState.state !== "HYDRATED" && localConversations.length === 0 && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(8, 12, 20, 0.95)",
+            backdropFilter: "blur(12px)",
+            zIndex: 9999,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            textAlign: "center",
+          }}
+        >
+          <div
+            style={{
+              width: 480,
+              maxWidth: "90%",
+              background: "#0d111a",
+              border: "1px solid #1e293b",
+              borderRadius: 20,
+              padding: 32,
+              boxShadow: "0 20px 50px rgba(0,0,0,0.6)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 16,
+            }}
+          >
+            <div style={{ fontSize: 44 }}>⚡</div>
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: "#f8fafc" }}>
+              Đang Chuẩn Bị Dữ Liệu Offline-First
+            </h2>
+            <p style={{ margin: 0, fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>
+              {hydrationState.message || "Đang trích xuất toàn bộ dữ liệu vào Staging Partition & kiểm tra toàn vẹn quan hệ..."}
+            </p>
+
+            <div style={{ width: "100%", height: 8, background: "#1e293b", borderRadius: 4, overflow: "hidden", marginTop: 8 }}>
+              <div
+                style={{
+                  width: `${hydrationState.progress || 30}%`,
+                  height: "100%",
+                  background: "linear-gradient(90deg, #0068ff, #10b981)",
+                  transition: "width 0.3s ease",
+                }}
+              />
+            </div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#10b981" }}>
+              TIẾN TRÌNH: {hydrationState.progress || 30}% ({hydrationState.state})
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 1. THANH ĐIỀU HƯỚNG DỌC (CỘT 1 - NAVIGATION SIDEBAR)                       */}
       {/* ========================================================================= */}
       <div
         style={{
           width: 68,
-          background: "#080c14",
+          background: "#06090e",
           borderRight: "1px solid #1e293b",
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
           padding: "16px 0",
-          justifyContent: "space-between",
+          gap: 20,
           flexShrink: 0,
           boxSizing: "border-box",
-          zIndex: 30,
         }}
       >
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 18, width: "100%" }}>
-          {/* Logo ZCHAT DESK */}
-          <div
-            title="ZCHAT DESK Pro"
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 14,
-              background: "linear-gradient(135deg, #10b981, #059669)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontWeight: 900,
-              color: "#ffffff",
-              fontSize: 20,
-              boxShadow: "0 4px 14px rgba(16, 185, 129, 0.35)",
-              cursor: "pointer",
-            }}
-          >
-            Z
-          </div>
+        {/* Brand Logo */}
+        <div
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: 14,
+            background: "linear-gradient(135deg, #10b981, #059669)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontWeight: 900,
+            fontSize: 22,
+            color: "#ffffff",
+            boxShadow: "0 4px 14px rgba(16, 185, 129, 0.4)",
+            cursor: "pointer",
+          }}
+        >
+          Z
+        </div>
 
-          {/* Navigation Buttons */}
+        {/* Tab Icons */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", alignItems: "center" }}>
           <button
             onClick={() => setNavTab("MESSAGES")}
-            title="Hội thoại & Tin nhắn"
+            title="Tin nhắn"
             style={{
               width: 44,
               height: 44,
               borderRadius: 12,
               background: navTab === "MESSAGES" ? "rgba(16, 185, 129, 0.15)" : "transparent",
-              color: navTab === "MESSAGES" ? "#10b981" : "#94a3b8",
+              color: navTab === "MESSAGES" ? "#10b981" : "#64748b",
               border: navTab === "MESSAGES" ? "1px solid rgba(16, 185, 129, 0.3)" : "none",
-              fontSize: 18,
+              fontSize: 20,
               cursor: "pointer",
               display: "flex",
-              flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
-              gap: 2,
+              transition: "all 0.2s",
             }}
           >
-            <span>💬</span>
-            <span style={{ fontSize: 9, fontWeight: 700 }}>Tin nhắn</span>
+            💬
           </button>
-
           <button
             onClick={() => setNavTab("CONTACTS")}
             title="Danh bạ"
@@ -781,21 +891,18 @@ export default function ZChatDeskApp() {
               height: 44,
               borderRadius: 12,
               background: navTab === "CONTACTS" ? "rgba(16, 185, 129, 0.15)" : "transparent",
-              color: navTab === "CONTACTS" ? "#10b981" : "#94a3b8",
+              color: navTab === "CONTACTS" ? "#10b981" : "#64748b",
               border: navTab === "CONTACTS" ? "1px solid rgba(16, 185, 129, 0.3)" : "none",
-              fontSize: 18,
+              fontSize: 20,
               cursor: "pointer",
               display: "flex",
-              flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
-              gap: 2,
+              transition: "all 0.2s",
             }}
           >
-            <span>👥</span>
-            <span style={{ fontSize: 9, fontWeight: 600 }}>Danh bạ</span>
+            👥
           </button>
-
           <button
             onClick={() => setNavTab("AUTOMATION")}
             title="Tự động hóa"
@@ -804,48 +911,43 @@ export default function ZChatDeskApp() {
               height: 44,
               borderRadius: 12,
               background: navTab === "AUTOMATION" ? "rgba(16, 185, 129, 0.15)" : "transparent",
-              color: navTab === "AUTOMATION" ? "#10b981" : "#94a3b8",
+              color: navTab === "AUTOMATION" ? "#10b981" : "#64748b",
               border: navTab === "AUTOMATION" ? "1px solid rgba(16, 185, 129, 0.3)" : "none",
-              fontSize: 18,
+              fontSize: 20,
               cursor: "pointer",
               display: "flex",
-              flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
-              gap: 2,
+              transition: "all 0.2s",
             }}
           >
-            <span>⚡</span>
-            <span style={{ fontSize: 8, fontWeight: 600 }}>Tự động hóa</span>
+            ⚡
           </button>
         </div>
 
-        {/* User Profile & Live Link */}
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+        {/* Bottom Status & Avatar */}
+        <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
           <Link
             href="/session"
-            title="Xem màn hình Master Session"
+            title="Master Chromium Live View"
             style={{
-              width: 44,
-              height: 44,
+              width: 40,
+              height: 40,
               borderRadius: 12,
-              background: "rgba(255,255,255,0.06)",
-              color: "#38bdf8",
+              background: "rgba(56, 189, 248, 0.1)",
+              border: "1px solid rgba(56, 189, 248, 0.3)",
               display: "flex",
-              flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
+              fontSize: 18,
               textDecoration: "none",
-              fontSize: 16,
-              border: "1px solid rgba(56, 189, 248, 0.2)",
+              color: "#38bdf8",
             }}
           >
-            <span>🖥️</span>
-            <span style={{ fontSize: 8, fontWeight: 700, color: "#38bdf8" }}>LIVE</span>
+            🖥️
           </Link>
-
           <div
-            title={`Trạng thái: ${wsStatus} (Admin)`}
+            title={`Trạng thái: ${wsStatus}`}
             style={{
               position: "relative",
               width: 40,
@@ -895,7 +997,7 @@ export default function ZChatDeskApp() {
         {/* Header Hộp thư */}
         <div style={{ padding: "16px 18px 12px 18px", borderBottom: "1px solid #1e293b", flexShrink: 0 }}>
           <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.08em", color: "#10b981", textTransform: "uppercase", marginBottom: 4 }}>
-            HỘP THƯ ZALO
+            HỘP THƯ ZALO (3NF)
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: "#f8fafc" }}>Hội thoại</h2>
@@ -1023,28 +1125,26 @@ export default function ZChatDeskApp() {
           </div>
         </div>
 
-        {/* Danh Sách Hội Thoại */}
-        <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "6px 8px" }}>
+        {/* Danh Sách Hội Thoại Scrollable */}
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           {isLoadingConversations ? (
-            <div style={{ textAlign: "center", padding: "40px 16px", color: "#64748b", fontSize: 13 }}>
+            <div style={{ padding: "30px 20px", textAlign: "center", color: "#94a3b8" }}>
               <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
-              <div>Đang tải toàn bộ hội thoại...</div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>Đang tải danh sách hội thoại từ Server...</div>
             </div>
           ) : filteredConversations.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "40px 16px", color: "#64748b", fontSize: 13 }}>
-              <div style={{ fontSize: 32, marginBottom: 10 }}>💬</div>
-              <div style={{ fontWeight: 700, color: "#cbd5e1", marginBottom: 6 }}>Chưa có hội thoại nào</div>
-              <p style={{ fontSize: 11.5, color: "#64748b", margin: "0 0 16px 0" }}>
-                Bấm nút bên dưới để trích xuất 100% dữ liệu từ Zalo Web!
-              </p>
+            <div style={{ padding: "30px 20px", textAlign: "center", color: "#64748b" }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>📭</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#94a3b8" }}>Không tìm thấy hội thoại</div>
               <button
                 onClick={handleTriggerLiveSync}
                 style={{
-                  padding: "8px 16px",
-                  background: "linear-gradient(135deg, #10b981, #059669)",
-                  color: "#fff",
+                  marginTop: 12,
+                  padding: "6px 14px",
+                  background: "#10b981",
                   border: "none",
                   borderRadius: 8,
+                  color: "#ffffff",
                   fontSize: 12,
                   fontWeight: 700,
                   cursor: "pointer",
@@ -1057,6 +1157,7 @@ export default function ZChatDeskApp() {
             filteredConversations.map((conv) => {
               const isSelected = conv.id === activeConvId;
               const isGroup = conv.type === "GROUP";
+
               return (
                 <div
                   key={conv.id}
@@ -1064,38 +1165,49 @@ export default function ZChatDeskApp() {
                   style={{
                     display: "flex",
                     alignItems: "center",
-                    padding: "10px 12px",
                     gap: 12,
-                    cursor: "pointer",
+                    padding: "12px 18px",
                     background: isSelected ? "rgba(16, 185, 129, 0.12)" : "transparent",
-                    borderRadius: 10,
-                    marginBottom: 4,
-                    border: isSelected ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid transparent",
-                    transition: "all 0.15s ease",
+                    borderLeft: isSelected ? "3px solid #10b981" : "3px solid transparent",
+                    borderBottom: "1px solid rgba(30, 41, 59, 0.6)",
+                    cursor: "pointer",
+                    transition: "background 0.15s ease",
                   }}
                 >
                   <div style={{ position: "relative" }}>
-                    <AvatarWithFallback name={conv.name} src={conv.avatar} size={42} />
-                    <span
-                      style={{
-                        position: "absolute",
-                        bottom: 0,
-                        right: 0,
-                        width: 8,
-                        height: 8,
-                        borderRadius: "50%",
-                        background: "#10b981",
-                        border: "2px solid #0d111a",
-                      }}
-                    />
+                    <AvatarWithFallback name={conv.name} src={conv.avatar} size={42} isGroup={isGroup} contactId={!isGroup ? conv.id : undefined} />
+                    {conv.isOnline && (
+                      <span
+                        style={{
+                          position: "absolute",
+                          bottom: 0,
+                          right: 0,
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          background: "#10b981",
+                          border: "2px solid #0d111a",
+                        }}
+                      />
+                    )}
                   </div>
 
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                        <span style={{ fontSize: 13, fontWeight: isSelected ? 800 : 700, color: isSelected ? "#10b981" : "#f1f5f9", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {conv.name}
-                        </span>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+                      <div
+                        style={{
+                          fontSize: 13.5,
+                          fontWeight: isSelected ? 800 : 600,
+                          color: isSelected ? "#ffffff" : "#f1f5f9",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                        }}
+                      >
+                        <span>{conv.name}</span>
                         {isGroup && (
                           <span style={{ fontSize: 9, background: "#1e293b", color: "#94a3b8", padding: "1px 4px", borderRadius: 4, fontWeight: 700, flexShrink: 0 }}>
                             NHÓM
@@ -1155,16 +1267,16 @@ export default function ZChatDeskApp() {
         >
           {currentActiveConv ? (
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <AvatarWithFallback name={currentActiveConv.name} src={currentActiveConv.avatar} size={38} />
+              <AvatarWithFallback name={currentActiveConv.name} src={currentActiveConv.avatar} size={38} isGroup={currentActiveConv.type === "GROUP"} contactId={currentActiveConv.type === "DIRECT" ? currentActiveConv.id : undefined} />
               <div>
                 <div style={{ fontSize: 15, fontWeight: 800, color: "#f8fafc", display: "flex", alignItems: "center", gap: 8 }}>
                   <span>{currentActiveConv.name}</span>
                   <span style={{ fontSize: 10, background: "rgba(0, 104, 255, 0.2)", color: "#38bdf8", border: "1px solid rgba(56, 189, 248, 0.3)", padding: "1px 6px", borderRadius: 6, fontWeight: 700 }}>
-                    ZALO
+                    ZALO 3NF
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: "#64748b" }}>
-                  Tin nhắn được đồng bộ từ Listener (Zero-Loss Pipeline)
+                  ID: <span style={{ fontFamily: "monospace", color: "#94a3b8" }}>{currentActiveConv.id}</span> • Phân định chuẩn Author/Container
                 </div>
               </div>
             </div>
@@ -1206,40 +1318,6 @@ export default function ZChatDeskApp() {
           </div>
         </div>
 
-        {/* Warning / Status Notification Banner */}
-        <div
-          style={{
-            background: "rgba(245, 158, 11, 0.1)",
-            borderBottom: "1px solid rgba(245, 158, 11, 0.2)",
-            padding: "6px 20px",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            fontSize: 11.5,
-            color: "#fbbf24",
-            flexShrink: 0,
-          }}
-        >
-          <span>
-            ⚠️ Trực tuyến qua Gateway Hub – Lịch sử tin nhắn và media luôn được lưu an toàn tại Server Volume.
-          </span>
-          <button
-            onClick={handleTriggerLiveSync}
-            style={{
-              background: "rgba(245, 158, 11, 0.2)",
-              border: "1px solid #f59e0b",
-              color: "#fbbf24",
-              borderRadius: 6,
-              padding: "2px 8px",
-              fontSize: 10.5,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            Đồng bộ sâu
-          </button>
-        </div>
-
         {/* Message Stream Area với Họa Tiết Grid Kỹ Thuật (Dark Grid Pattern) */}
         <div
           style={{
@@ -1248,7 +1326,7 @@ export default function ZChatDeskApp() {
             overflowY: "auto",
             display: "flex",
             flexDirection: "column",
-            gap: 12,
+            gap: 14,
             minHeight: 0,
             backgroundImage: `
               linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
@@ -1282,7 +1360,7 @@ export default function ZChatDeskApp() {
             <div style={{ margin: "auto", textAlign: "center", color: "#64748b" }}>
               <div style={{ fontSize: 36, marginBottom: 12 }}>💬</div>
               <div style={{ fontSize: 16, fontWeight: 800, color: "#cbd5e1" }}>
-                Chưa có tin nhắn lưu trong event log
+                Chưa có tin nhắn lưu trong database
               </div>
               <div style={{ fontSize: 12, marginTop: 4, color: "#64748b" }}>
                 Tin nhắn mới sẽ xuất hiện tự động khi Listener nhận được hoặc bấm <b>"⚡ Sync"</b>!
@@ -1295,102 +1373,164 @@ export default function ZChatDeskApp() {
                 ? `/api/media/proxy?url=${encodeURIComponent(m.mediaUrl)}`
                 : m.mediaUrl;
 
+              // 3NF SENDER RESOLUTION: Giải mã thông tin tác giả thực sự từ contacts table
+              const senderContact = m.senderId ? contactMap.get(m.senderId) : undefined;
+              const authorName = senderContact?.displayName || m.senderName || (currentActiveConv?.type === "DIRECT" ? currentActiveConv.name : `Thành viên ${m.senderId ? m.senderId.slice(-4) : "Zalo"}`);
+              const isGroup = currentActiveConv?.type === "GROUP";
+
               return (
                 <div
                   key={m.msgId}
                   style={{
                     alignSelf: isMe ? "flex-end" : "flex-start",
-                    maxWidth: "70%",
+                    maxWidth: "72%",
                     display: "flex",
-                    flexDirection: "column",
-                    alignItems: isMe ? "flex-end" : "flex-start",
+                    alignItems: "flex-start",
+                    gap: 8,
+                    flexDirection: isMe ? "row-reverse" : "row",
                   }}
                 >
-                  <div
-                    style={{
-                      background: isMe ? "linear-gradient(135deg, #0068ff, #0052cc)" : "#161f30",
-                      color: "#ffffff",
-                      padding: "10px 16px",
-                      borderRadius: 16,
-                      borderBottomRightRadius: isMe ? 2 : 16,
-                      borderBottomLeftRadius: isMe ? 16 : 2,
-                      boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
-                      border: isMe ? "1px solid rgba(255,255,255,0.15)" : "1px solid #243048",
-                      position: "relative",
-                    }}
-                  >
-                    {/* Media: Hình ảnh */}
-                    {mediaProxyUrl && m.type === "IMAGE" && (
-                      <img
-                        src={mediaProxyUrl}
-                        alt="Media Attachment"
-                        onClick={() => setPreviewImage(mediaProxyUrl)}
-                        style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
-                      />
-                    )}
-
-                    {/* Media: Video */}
-                    {mediaProxyUrl && m.type === "VIDEO" && (
-                      <video
-                        controls
-                        src={mediaProxyUrl}
-                        style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
-                      />
-                    )}
-
-                    {/* Media: Tin Nhắn Thoại Audio Voice Player */}
-                    {mediaProxyUrl && m.type === "VOICE" && (
-                      <AudioVoicePlayer src={mediaProxyUrl} isMe={isMe} />
-                    )}
-
-                    {/* Media: Tệp đính kèm */}
-                    {m.mediaUrl && m.type === "FILE" && (
-                      <FileAttachmentCard
-                        name={m.mediaName}
-                        size={m.mediaSize}
-                        url={m.mediaUrl}
-                        isMe={isMe}
-                      />
-                    )}
-
-                    {/* Text Content Renderer với @mentions & URL */}
-                    {m.textContent && (
-                      <MessageContentRenderer
-                        text={m.textContent}
-                        mentions={m.mentions}
-                        isMe={isMe}
-                      />
-                    )}
-
-                    <div style={{ fontSize: 10, color: isMe ? "rgba(255,255,255,0.7)" : "#64748b", marginTop: 4, textAlign: "right" }}>
-                      {new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {isMe && (m.status === "SENDING" ? "⏳" : "✓✓")}
-                    </div>
-                  </div>
-
-                  {/* Reaction Pills */}
-                  {m.reactions && m.reactions.length > 0 && (
-                    <div style={{ display: "flex", gap: 4, marginTop: -6, zIndex: 2, paddingLeft: isMe ? 0 : 8, paddingRight: isMe ? 8 : 0 }}>
-                      {m.reactions.map((r, rIdx) => (
-                        <span
-                          key={rIdx}
-                          style={{
-                            background: "#1e293b",
-                            border: "1px solid #334155",
-                            borderRadius: 12,
-                            padding: "2px 6px",
-                            fontSize: 11,
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 3,
-                            boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
-                          }}
-                        >
-                          <span>{r.emoji}</span>
-                          {r.count > 1 && <span style={{ fontWeight: 700, color: "#10b981" }}>{r.count}</span>}
-                        </span>
-                      ))}
-                    </div>
+                  {/* Author Avatar (3NF Strict Resolution) */}
+                  {!isMe && (
+                    <AvatarWithFallback
+                      name={authorName}
+                      src={senderContact?.avatarUrl || m.senderAvatar}
+                      contactId={m.senderId}
+                      size={32}
+                    />
                   )}
+
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
+                    {/* Tên người gửi trong Group Chat */}
+                    {!isMe && isGroup && (
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#38bdf8", marginBottom: 3, paddingLeft: 4 }}>
+                        {authorName}
+                      </span>
+                    )}
+
+                    <div
+                      style={{
+                        background: isMe
+                          ? m.status === "FAILED"
+                            ? "linear-gradient(135deg, #7f1d1d, #991b1b)"
+                            : "linear-gradient(135deg, #0068ff, #0052cc)"
+                          : "#161f30",
+                        color: "#ffffff",
+                        padding: "10px 16px",
+                        borderRadius: 16,
+                        borderBottomRightRadius: isMe ? 2 : 16,
+                        borderBottomLeftRadius: isMe ? 16 : 2,
+                        boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+                        border: isMe
+                          ? m.status === "FAILED"
+                            ? "1px solid #ef4444"
+                            : "1px solid rgba(255,255,255,0.15)"
+                          : "1px solid #243048",
+                        position: "relative",
+                      }}
+                    >
+                      {/* Media: Hình ảnh */}
+                      {mediaProxyUrl && m.type === "IMAGE" && (
+                        <img
+                          src={mediaProxyUrl}
+                          alt="Media Attachment"
+                          onClick={() => setPreviewImage(mediaProxyUrl)}
+                          style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
+                        />
+                      )}
+
+                      {/* Media: Video */}
+                      {mediaProxyUrl && m.type === "VIDEO" && (
+                        <video
+                          controls
+                          src={mediaProxyUrl}
+                          style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block" }}
+                        />
+                      )}
+
+                      {/* Media: Tin Nhắn Thoại Audio Voice Player */}
+                      {mediaProxyUrl && m.type === "VOICE" && (
+                        <AudioVoicePlayer src={mediaProxyUrl} isMe={isMe} />
+                      )}
+
+                      {/* Media: Tệp đính kèm */}
+                      {m.mediaUrl && m.type === "FILE" && (
+                        <FileAttachmentCard
+                          name={m.mediaName}
+                          size={m.mediaSize}
+                          url={m.mediaUrl}
+                          isMe={isMe}
+                        />
+                      )}
+
+                      {/* Text Content Renderer với @mentions & URL */}
+                      {m.textContent && (
+                        <MessageContentRenderer
+                          text={m.textContent}
+                          mentions={m.mentions}
+                          isMe={isMe}
+                        />
+                      )}
+
+                      {/* Timestamp & Outbound Status */}
+                      <div style={{ fontSize: 10, color: isMe ? "rgba(255,255,255,0.7)" : "#64748b", marginTop: 4, textAlign: "right", display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 4 }}>
+                        <span>{new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                        {isMe && (
+                          <span>
+                            {m.status === "SENDING" ? "⏳" : m.status === "FAILED" ? "⚠️ Lỗi" : "✓✓"}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Nút Retry nếu tin nhắn gửi thất bại */}
+                    {isMe && m.status === "FAILED" && (
+                      <button
+                        onClick={() => handleSendMessage(m.textContent, m.msgId)}
+                        style={{
+                          marginTop: 4,
+                          background: "#ef4444",
+                          border: "none",
+                          borderRadius: 6,
+                          color: "#ffffff",
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          padding: "2px 8px",
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 3,
+                        }}
+                      >
+                        🔄 Thử lại
+                      </button>
+                    )}
+
+                    {/* Reaction Pills */}
+                    {m.reactions && m.reactions.length > 0 && (
+                      <div style={{ display: "flex", gap: 4, marginTop: -6, zIndex: 2, paddingLeft: isMe ? 0 : 8, paddingRight: isMe ? 8 : 0 }}>
+                        {m.reactions.map((r, rIdx) => (
+                          <span
+                            key={rIdx}
+                            style={{
+                              background: "#1e293b",
+                              border: "1px solid #334155",
+                              borderRadius: 12,
+                              padding: "2px 6px",
+                              fontSize: 11,
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 3,
+                              boxShadow: "0 1px 4px rgba(0,0,0,0.3)",
+                            }}
+                          >
+                            <span>{r.emoji}</span>
+                            {r.count > 1 && <span style={{ fontWeight: 700, color: "#10b981" }}>{r.count}</span>}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })
@@ -1398,51 +1538,43 @@ export default function ZChatDeskApp() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Realtime Status Footer Line */}
-        <div style={{ padding: "4px 20px", background: "#080c14", borderTop: "1px solid #1e293b", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10.5, color: "#64748b" }}>
-          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#10b981" }}></span>
-            Realtime qua WebSocket Gateway Hub – gửi qua Job Queue bảo vệ an toàn
-          </span>
-          <span>{activeMessages.length} tin nhắn trong phiên</span>
-        </div>
-
-        {/* Thanh Trả Lời Nhanh (Quick Replies Bar) */}
-        <div style={{ padding: "8px 20px", background: "#0d111a", borderTop: "1px solid #1e293b", display: "flex", alignItems: "center", gap: 8, overflowX: "auto" }}>
-          <span style={{ fontSize: 10.5, fontWeight: 800, color: "#10b981", textTransform: "uppercase", whiteSpace: "nowrap" }}>
-            TRẢ LỜI NHANH:
-          </span>
-          {[
-            "Mình kiểm tra ngay",
-            "Cảm ơn bạn đã chờ",
-            "Sẽ phản hồi sớm",
-            "Đang xử lý yêu cầu",
-          ].map((quickText, qIdx) => (
+        {/* Thanh Trả Lời Nhanh (Quick Replies Toolbar) */}
+        <div
+          style={{
+            padding: "8px 20px",
+            background: "#0d111a",
+            borderTop: "1px solid #1e293b",
+            display: "flex",
+            gap: 8,
+            overflowX: "auto",
+            flexShrink: 0,
+          }}
+        >
+          {["[Mình kiểm tra ngay]", "[Cảm ơn bạn đã chờ]", "[Sẽ phản hồi sớm]", "[Đang xử lý yêu cầu]"].map((qr, idx) => (
             <button
-              key={qIdx}
-              type="button"
-              onClick={() => setInputText(quickText)}
+              key={idx}
+              onClick={() => setInputText((prev) => (prev ? `${prev} ${qr}` : qr))}
               style={{
                 padding: "4px 10px",
                 background: "#151c2c",
                 border: "1px solid #243048",
-                borderRadius: 14,
-                color: "#cbd5e1",
+                borderRadius: 8,
                 fontSize: 11,
+                fontWeight: 600,
+                color: "#cbd5e1",
                 cursor: "pointer",
                 whiteSpace: "nowrap",
               }}
             >
-              {quickText}
+              {qr}
             </button>
           ))}
         </div>
 
-        {/* Khung Nhập Tin Nhắn (Composer) */}
-        <form
-          onSubmit={handleSendMessage}
+        {/* Khung Soạn Thảo Tin Nhắn (Composer Input Area) */}
+        <div
           style={{
-            padding: "12px 20px",
+            padding: "12px 20px 16px 20px",
             background: "#0d111a",
             borderTop: "1px solid #1e293b",
             display: "flex",
@@ -1454,98 +1586,83 @@ export default function ZChatDeskApp() {
           <input
             type="file"
             ref={fileInputRef}
-            onChange={handleFileChange}
-            accept="image/*,video/*,audio/*,.pdf,.doc,.docx"
+            onChange={handleFileUpload}
             style={{ display: "none" }}
+            accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.zip"
           />
+
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            title="Đính kèm tệp / hình ảnh / âm thanh"
+            disabled={uploading}
             style={{
-              width: 36,
-              height: 36,
-              borderRadius: 8,
+              width: 38,
+              height: 38,
+              borderRadius: 10,
               background: "#151c2c",
               border: "1px solid #243048",
               color: "#94a3b8",
+              fontSize: 18,
               cursor: "pointer",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: 16,
+              flexShrink: 0,
             }}
           >
             {uploading ? "⏳" : "➕"}
-          </button>
-          <button
-            type="button"
-            title="Emoji & Biểu cảm"
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 8,
-              background: "#151c2c",
-              border: "1px solid #243048",
-              color: "#94a3b8",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 16,
-            }}
-          >
-            😊
           </button>
 
           <div style={{ flex: 1, position: "relative" }}>
             <input
               type="text"
+              placeholder={`Nhập tin nhắn gửi tới ${currentActiveConv?.name || "Zalo"}...`}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder={`Nhập tin nhắn gửi tới ${currentActiveConv ? currentActiveConv.name : "Zalo"}...`}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  handleSendMessage();
+                }
+              }}
               style={{
                 width: "100%",
-                padding: "10px 48px 10px 16px",
+                padding: "10px 14px",
                 background: "#151c2c",
                 border: "1px solid #243048",
-                borderRadius: 20,
+                borderRadius: 10,
                 outline: "none",
-                fontSize: 13,
+                fontSize: 13.5,
                 color: "#f8fafc",
                 boxSizing: "border-box",
               }}
             />
-            <span style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", fontSize: 10, color: "#64748b" }}>
-              {inputText.length}/4000
-            </span>
           </div>
 
           <button
-            type="submit"
+            onClick={() => handleSendMessage()}
             style={{
-              padding: "10px 20px",
+              padding: "10px 18px",
               background: "linear-gradient(135deg, #10b981, #059669)",
-              color: "#ffffff",
               border: "none",
-              borderRadius: 20,
-              fontWeight: 800,
+              borderRadius: 10,
+              color: "#ffffff",
               fontSize: 13,
+              fontWeight: 800,
               cursor: "pointer",
               display: "flex",
               alignItems: "center",
               gap: 6,
-              boxShadow: "0 2px 10px rgba(16, 185, 129, 0.35)",
+              boxShadow: "0 2px 8px rgba(16, 185, 129, 0.3)",
+              flexShrink: 0,
             }}
           >
-            <span>Gửi</span>
-            <span>↗️</span>
+            Gửi ↗️
           </button>
-        </form>
+        </div>
       </div>
 
       {/* ========================================================================= */}
-      {/* 4. BẢNG CHI TIẾT METADATA & AN TOÀN (CỘT 4 - RIGHT METADATA INSPECTOR)   */}
+      {/* 4. CỘT METADATA INSPECTOR (CỘT 4 - THÔNG TIN CHI TIẾT)                    */}
       {/* ========================================================================= */}
       <div
         style={{
@@ -1555,156 +1672,173 @@ export default function ZChatDeskApp() {
           display: "flex",
           flexDirection: "column",
           padding: "20px 16px",
+          gap: 16,
           flexShrink: 0,
-          height: "100%",
-          boxSizing: "border-box",
           overflowY: "auto",
+          boxSizing: "border-box",
         }}
       >
-        {/* Profile Card */}
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", paddingBottom: 20, borderBottom: "1px solid #1e293b" }}>
-          <div style={{ marginBottom: 12 }}>
-            <AvatarWithFallback name={currentActiveConv?.name || "Zalo"} src={currentActiveConv?.avatar} size={64} />
-          </div>
-          <div style={{ fontSize: 15, fontWeight: 800, color: "#f8fafc", marginBottom: 2 }}>
-            {currentActiveConv?.name || "Chưa chọn hội thoại"}
-          </div>
-          <div style={{ fontSize: 11.5, color: "#10b981", fontWeight: 700 }}>
-            {currentActiveConv?.type === "GROUP" ? "Nhóm Zalo" : "Hội thoại cá nhân"}
-          </div>
-        </div>
+        {currentActiveConv ? (
+          <>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 8, paddingBottom: 16, borderBottom: "1px solid #1e293b" }}>
+              <AvatarWithFallback name={currentActiveConv.name} src={currentActiveConv.avatar} size={64} isGroup={currentActiveConv.type === "GROUP"} contactId={currentActiveConv.type === "DIRECT" ? currentActiveConv.id : undefined} />
+              <div style={{ fontSize: 15, fontWeight: 800, color: "#f8fafc" }}>{currentActiveConv.name}</div>
+              <div style={{ fontSize: 11, color: "#64748b" }}>Zalo {currentActiveConv.type === "GROUP" ? "Nhóm" : "Cá nhân"}</div>
+            </div>
 
-        {/* Section: THÔNG TIN KẾT NỐI */}
-        <div style={{ marginTop: 18 }}>
-          <div style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
-            THÔNG TIN KẾT NỐI
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "#94a3b8" }}>Tài khoản:</span>
-              <span style={{ fontWeight: 700, color: "#f8fafc" }}>Admin (Master)</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.06em", color: "#10b981", textTransform: "uppercase" }}>
+                THÔNG TIN KẾT NỐI (3NF)
+              </div>
+              <div style={{ background: "#0d111a", padding: "10px 12px", borderRadius: 10, border: "1px solid #1e293b", display: "flex", flexDirection: "column", gap: 6, fontSize: 11.5 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "#64748b" }}>Thread ID:</span>
+                  <span style={{ fontFamily: "monospace", color: "#94a3b8" }}>{currentActiveConv.id}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "#64748b" }}>Loại:</span>
+                  <span style={{ fontWeight: 700, color: "#f8fafc" }}>{currentActiveConv.type}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "#64748b" }}>Tin nhắn:</span>
+                  <span style={{ fontWeight: 700, color: "#10b981" }}>{activeMessages.length} tin</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "#64748b" }}>Outbound:</span>
+                  <span style={{ color: "#10b981", fontWeight: 700 }}>🟢 Headless Dispatch</span>
+                </div>
+              </div>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "#94a3b8" }}>Thread ID:</span>
-              <span style={{ fontWeight: 600, color: "#38bdf8", fontFamily: "monospace", fontSize: 11 }}>
-                {currentActiveConv?.id || "N/A"}
-              </span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "#94a3b8" }}>Loại:</span>
-              <span style={{ fontWeight: 700, color: "#f8fafc" }}>
-                {currentActiveConv?.type === "GROUP" ? "Nhóm" : "Cá nhân"}
-              </span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: "#94a3b8" }}>Listener:</span>
-              <span style={{ color: "#10b981", fontWeight: 700 }}>🟢 Sẵn sàng</span>
-            </div>
+          </>
+        ) : (
+          <div style={{ color: "#64748b", fontSize: 12, textAlign: "center", marginTop: 40 }}>
+            Chọn một hội thoại để xem thông tin chi tiết
           </div>
-        </div>
-
-        {/* Section: TRẠNG THÁI HỘP THƯ */}
-        <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #1e293b" }}>
-          <div style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
-            TRẠNG THÁI HỘP THƯ
-          </div>
-          <div style={{ background: "rgba(16, 185, 129, 0.1)", border: "1px solid rgba(16, 185, 129, 0.3)", borderRadius: 8, padding: "8px 10px", fontSize: 11.5 }}>
-            <div style={{ color: "#10b981", fontWeight: 700, marginBottom: 2 }}>🟢 Sẵn sàng gửi tin</div>
-            <div style={{ color: "#94a3b8", fontSize: 10.5 }}>
-              Tài khoản và Listener đang hoạt động bình thường trên Server Linux.
-            </div>
-          </div>
-        </div>
-
-        {/* Section: AN TOÀN GỬI TIN */}
-        <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #1e293b" }}>
-          <div style={{ fontSize: 10, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
-            AN TOÀN GỬI TIN
-          </div>
-          <p style={{ fontSize: 11, color: "#64748b", lineHeight: 1.4, margin: 0 }}>
-            Tin nhắn được xếp hàng qua Token Bucket Limiter để đảm bảo an toàn tài khoản và tránh bị khóa do gửi quá nhanh.
-          </p>
-        </div>
+        )}
       </div>
 
-      {/* ========================================================================= */}
-      {/* 5. CỬA SỔ THEO DÕI ĐỒNG BỘ TRỰC TIẾP (LIVE SYNC TERMINAL MODAL)           */}
-      {/* ========================================================================= */}
+      {/* Sync Modal Overlay */}
       {showSyncModal && (
-        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(3, 7, 18, 0.85)", backdropFilter: "blur(6px)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-          <div style={{ width: "100%", maxWidth: 660, background: "#0d111a", border: "1px solid #1e293b", borderRadius: 16, overflow: "hidden", boxShadow: "0 24px 48px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column" }}>
-            <div style={{ padding: "16px 20px", background: "#080c14", borderBottom: "1px solid #1e293b", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 20 }}>⚡</span>
-                <span style={{ fontWeight: 800, fontSize: 15, color: "#f8fafc" }}>Tiến trình Đồng bộ Toàn diện Unbounded Engine</span>
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.75)",
+            backdropFilter: "blur(6px)",
+            zIndex: 999,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+          }}
+        >
+          <div
+            style={{
+              width: 520,
+              maxWidth: "95%",
+              background: "#0d111a",
+              border: "1px solid #1e293b",
+              borderRadius: 18,
+              padding: 24,
+              boxShadow: "0 20px 50px rgba(0,0,0,0.6)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 16,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: "#f8fafc", display: "flex", alignItems: "center", gap: 8 }}>
+                <span>⚡ Tiến Trình Đồng Bộ Blue/Green Staging</span>
               </div>
-              <button
-                onClick={() => setShowSyncModal(false)}
-                disabled={isFullSyncing}
-                style={{ background: "transparent", border: "none", color: "#94a3b8", fontSize: 18, cursor: isFullSyncing ? "not-allowed" : "pointer" }}
-              >
-                ✕
-              </button>
+              {!isFullSyncing && (
+                <button
+                  onClick={() => setShowSyncModal(false)}
+                  style={{ background: "transparent", border: "none", color: "#94a3b8", fontSize: 18, cursor: "pointer" }}
+                >
+                  ✕
+                </button>
+              )}
             </div>
 
-            <div style={{ padding: "18px 20px", borderBottom: "1px solid #1e293b", background: "#0d111a" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: 13, color: "#cbd5e1" }}>
-                <span>{isFullSyncing ? `Đang xử lý: ${syncCurrentName || "Zalo Master"}` : "✅ Đồng bộ thành công!"}</span>
-                <span style={{ fontWeight: 800, color: "#10b981" }}>{syncPercent}%</span>
-              </div>
-              <div style={{ width: "100%", height: 8, background: "#1e293b", borderRadius: 4, overflow: "hidden" }}>
-                <div
-                  style={{
-                    width: `${syncPercent}%`,
-                    height: "100%",
-                    background: "linear-gradient(90deg, #10b981, #38bdf8)",
-                    transition: "width 0.3s ease",
-                  }}
-                />
-              </div>
+            <div style={{ width: "100%", height: 8, background: "#1e293b", borderRadius: 4, overflow: "hidden" }}>
+              <div
+                style={{
+                  width: `${syncPercent}%`,
+                  height: "100%",
+                  background: "linear-gradient(90deg, #0068ff, #10b981)",
+                  transition: "width 0.3s ease",
+                }}
+              />
+            </div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#10b981" }}>
+              {syncPercent}% {syncCurrentName && `- ${syncCurrentName}`}
             </div>
 
-            <div style={{ height: 260, background: "#05080f", padding: "14px 18px", overflowY: "auto", fontFamily: "monospace", fontSize: 12, color: "#10b981", display: "flex", flexDirection: "column", gap: 6 }}>
-              {syncLogs.map((line, idx) => (
-                <div key={idx} style={{ lineHeight: 1.4, wordBreak: "break-word" }}>
-                  {line}
-                </div>
+            <div
+              style={{
+                height: 180,
+                background: "#080c14",
+                borderRadius: 10,
+                border: "1px solid #1e293b",
+                padding: "10px 14px",
+                overflowY: "auto",
+                fontFamily: "monospace",
+                fontSize: 11,
+                color: "#cbd5e1",
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+              }}
+            >
+              {syncLogs.map((log, idx) => (
+                <div key={idx}>{log}</div>
               ))}
               <div ref={logsEndRef} />
             </div>
 
-            <div style={{ padding: "14px 20px", background: "#080c14", borderTop: "1px solid #1e293b", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11.5, color: "#64748b" }}>
-                {isFullSyncing ? "⚡ Đang trích xuất toàn bộ hội thoại & media..." : "100% dữ liệu đã được lưu vào Server Volume."}
-              </span>
+            {!isFullSyncing && (
               <button
                 onClick={() => setShowSyncModal(false)}
-                disabled={isFullSyncing}
                 style={{
-                  padding: "8px 20px",
-                  background: isFullSyncing ? "#334155" : "linear-gradient(135deg, #10b981, #059669)",
-                  color: "#fff",
+                  padding: "10px",
+                  background: "#10b981",
                   border: "none",
-                  borderRadius: 8,
-                  fontWeight: 700,
+                  borderRadius: 10,
+                  color: "#ffffff",
                   fontSize: 13,
-                  cursor: isFullSyncing ? "wait" : "pointer",
+                  fontWeight: 700,
+                  cursor: "pointer",
                 }}
               >
-                {isFullSyncing ? "⏳ Đang chạy..." : "Đóng & Trải nghiệm Chat"}
+                Đóng
               </button>
-            </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Modal Xem ảnh phóng to */}
+      {/* Image Preview Lightbox Modal */}
       {previewImage && (
         <div
           onClick={() => setPreviewImage(null)}
-          style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.9)", zIndex: 3000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.88)",
+            backdropFilter: "blur(8px)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+            cursor: "zoom-out",
+          }}
         >
-          <img src={previewImage} alt="Large preview" style={{ maxWidth: "90%", maxHeight: "90%", borderRadius: 10, boxShadow: "0 20px 40px rgba(0,0,0,0.8)" }} />
+          <img
+            src={previewImage}
+            alt="Preview"
+            style={{ maxWidth: "90%", maxHeight: "90%", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,0.8)" }}
+          />
         </div>
       )}
     </div>

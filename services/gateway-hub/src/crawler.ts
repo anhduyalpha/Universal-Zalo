@@ -1,4 +1,4 @@
-import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
+import { serverStorage, StoredMessage, StoredConversation, StoredContact } from "./storage.js";
 import { cleanMessageContent, parseTimestamp } from "./normalizer.js";
 import { cdpClient } from "./cdp_client.js";
 
@@ -19,17 +19,19 @@ export interface MasterDumpResult {
   totalMessages: number;
   conversations: StoredConversation[];
   messagesByConversation: Record<string, StoredMessage[]>;
+  contacts?: StoredContact[];
   error?: string;
 }
 
 /**
- * TRÍCH XUẤT ĐA TẦNG TOÀN DIỆN (Universal Deep Multi-Layer Extractor):
- * 1. Deep-scan toàn bộ cơ sở dữ liệu IndexedDB của Zalo trong Chromium
- * 2. In-memory Redux/MobX state (window.appStore, window.zaloStore, window.__INITIAL_STATE__)
+ * TRÍCH XUẤT ĐA TẦNG TOÀN DIỆN 3NF (Universal Deep Multi-Layer Extractor)
+ * 1. Deep-scan toàn bộ cơ sở dữ liệu IndexedDB của Zalo trong Chromium với String IDs
+ * 2. In-memory Redux state (window.appStore, window.zaloStore)
  * 3. Tự động cuộn Sidebar và DOM Tree AST Parsing của mọi cuộc hội thoại
  */
 export async function extractFromZaloIndexedDB(): Promise<{
   conversations: StoredConversation[];
+  contacts: StoredContact[];
   messagesByConv: Record<string, StoredMessage[]>;
 } | null> {
   const script = `
@@ -37,10 +39,16 @@ export async function extractFromZaloIndexedDB(): Promise<{
       try {
         const result = {
           conversations: [],
+          contacts: [],
           messages: []
         };
 
-        // 1. Quét In-Memory State của Zalo Web (Redux / Global Store / React Root)
+        const sanitizeId = (id) => {
+          if (id === null || id === undefined) return "";
+          return String(id).trim();
+        };
+
+        // 1. Quét In-Memory State của Zalo Web (Redux / Global Store)
         try {
           const globalStores = [
             window.appStore,
@@ -62,7 +70,6 @@ export async function extractFromZaloIndexedDB(): Promise<{
               state.conversations,
               state.chats,
               state.recentChats,
-              state.contacts
             ];
 
             for (const src of threadSources) {
@@ -72,10 +79,12 @@ export async function extractFromZaloIndexedDB(): Promise<{
                   if (item && typeof item === 'object') {
                     const rawName = item.name || item.displayName || item.title || item.groupName || "";
                     const name = String(rawName).replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').replace(/:$/, '').trim();
-                    if (name && name !== "Tìm kiếm" && name !== "Bạn") {
-                      const isGroup = Boolean(item.isGroup || item.type === 1 || item.type === "group" || name.includes("Nhóm") || name.includes("UIT") || name.includes("AI"));
+                    const rawId = item.id || item.threadId || item.convId || item.grid || item.uid || item.key;
+                    if (rawId && name && name !== "Tìm kiếm" && name !== "Bạn") {
+                      const strId = sanitizeId(rawId);
+                      const isGroup = Boolean(item.isGroup || item.type === 1 || item.type === "group" || strId.startsWith("g_") || name.includes("Nhóm"));
                       result.conversations.push({
-                        id: String(item.id || item.threadId || item.convId || item.key || ('conv_' + Math.random().toString(36).substring(7))),
+                        id: strId,
                         name: name,
                         avatar: item.avatar || item.thumb || item.avatarUrl || item.picture || "",
                         lastMessage: String(item.lastMessage || item.snippet || item.lastMsg || item.msg || "Đã đồng bộ từ Zalo Store"),
@@ -84,6 +93,26 @@ export async function extractFromZaloIndexedDB(): Promise<{
                         type: isGroup ? "GROUP" : "DIRECT",
                       });
                     }
+                  }
+                }
+              }
+            }
+
+            // Quét danh bạ contacts trong Redux
+            if (state.contacts) {
+              const contactList = Array.isArray(state.contacts) ? state.contacts : Object.values(state.contacts);
+              for (const ct of contactList) {
+                if (ct && typeof ct === 'object') {
+                  const ctId = sanitizeId(ct.uid || ct.userId || ct.id);
+                  const ctName = ct.displayName || ct.name || ct.zaloName || "";
+                  if (ctId && ctName) {
+                    result.contacts.push({
+                      id: ctId,
+                      displayName: ctName,
+                      avatarUrl: ct.avatar || ct.thumb || "",
+                      isStub: false,
+                      updatedAt: Date.now(),
+                    });
                   }
                 }
               }
@@ -120,14 +149,16 @@ export async function extractFromZaloIndexedDB(): Promise<{
                     for (const record of records) {
                       if (!record || typeof record !== 'object') continue;
 
-                      // Nhận diện đối tượng Conversation / Thread
+                      // Trích xuất Conversation
                       const potentialName = record.name || record.displayName || record.title || record.groupName;
-                      if (potentialName && typeof potentialName === 'string') {
+                      const rawId = record.id || record.threadId || record.convId || record.grid || record.uid;
+                      if (potentialName && typeof potentialName === 'string' && rawId) {
                         const name = potentialName.replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').replace(/:$/, '').trim();
+                        const strId = sanitizeId(rawId);
                         if (name && name !== "Tìm kiếm" && name !== "Bạn") {
-                          const isGroup = Boolean(record.isGroup || record.type === 1 || name.includes("Nhóm") || name.includes("UIT"));
+                          const isGroup = Boolean(record.isGroup || record.type === 1 || strId.startsWith("g_") || name.includes("Nhóm"));
                           result.conversations.push({
-                            id: String(record.id || record.threadId || record.convId || ('conv_' + Math.random().toString(36).substring(7))),
+                            id: strId,
                             name: name,
                             avatar: record.avatar || record.thumb || record.avatarUrl || "",
                             lastMessage: String(record.lastMessage || record.snippet || record.lastMsg || "Tin nhắn từ IndexedDB"),
@@ -138,15 +169,24 @@ export async function extractFromZaloIndexedDB(): Promise<{
                         }
                       }
 
-                      // Nhận diện đối tượng Message
+                      // Trích xuất Message (Decoupled Scope Routing)
                       const potentialMsg = record.message || record.content || record.text || record.msgBody || record.data;
                       const msgId = record.msgId || record.globalMsgId || record.id || record.cliMsgId;
                       if (msgId && (potentialMsg || record.mediaUrl || record.url || record.thumbUrl)) {
                         const rawText = typeof potentialMsg === 'string' ? potentialMsg : (potentialMsg ? JSON.stringify(potentialMsg) : "");
                         const isMe = Boolean(record.isMe || record.fromMe || record.senderType === 1);
+                        const isGroup = Boolean(record.grid || (record.threadId && String(record.threadId).startsWith('g_')));
+                        const convId = isGroup 
+                          ? sanitizeId(record.grid || record.threadId)
+                          : sanitizeId(record.uid || record.threadId || record.toId || "general");
+                        const senderId = isMe ? "ME" : sanitizeId(record.fromUid || record.fromId || record.uid || convId);
+
                         result.messages.push({
-                          msgId: String(msgId),
-                          conversationId: String(record.threadId || record.convId || record.toId || record.fromId || "general"),
+                          msgId: sanitizeId(msgId),
+                          conversationId: convId,
+                          senderId: senderId,
+                          senderName: record.senderName || record.displayName,
+                          senderAvatar: record.avatar || record.senderAvatar,
                           rawText: rawText,
                           sender: isMe ? "ME" : "OTHER",
                           timestamp: Number(record.timestamp || record.ts || record.sendTime) || Date.now(),
@@ -185,50 +225,72 @@ export async function extractFromZaloIndexedDB(): Promise<{
     }
 
     const conversations: StoredConversation[] = [];
-    const convMap = new Map<string, StoredConversation>();
+    const convIdSet = new Set<string>();
 
     for (const c of data.conversations) {
-      if (c.name && !convMap.has(c.name.toLowerCase())) {
-        const storedConv: StoredConversation = {
-          id: c.id,
+      const strId = String(c.id);
+      if (strId && !convIdSet.has(strId)) {
+        convIdSet.add(strId);
+        conversations.push({
+          id: strId,
           name: c.name,
           avatar: c.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(c.name)}`,
           type: c.type || "DIRECT",
           lastMessage: c.lastMessage || "Tin nhắn đồng bộ từ IndexedDB",
-          lastTimestamp: typeof c.lastTimestamp === 'number' ? c.lastTimestamp : Date.now(),
-          unreadCount: typeof c.unreadCount === 'number' ? c.unreadCount : 0,
-        };
-        convMap.set(c.name.toLowerCase(), storedConv);
-        conversations.push(storedConv);
+          lastTimestamp: typeof c.lastTimestamp === "number" ? c.lastTimestamp : Date.now(),
+          unreadCount: typeof c.unreadCount === "number" ? c.unreadCount : 0,
+        });
+      }
+    }
+
+    const contacts: StoredContact[] = [];
+    const contactIdSet = new Set<string>();
+    if (Array.isArray(data.contacts)) {
+      for (const ct of data.contacts) {
+        const ctId = String(ct.id);
+        if (ctId && !contactIdSet.has(ctId)) {
+          contactIdSet.add(ctId);
+          contacts.push({
+            id: ctId,
+            displayName: ct.displayName,
+            avatarUrl: ct.avatarUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(ctId)}`,
+            isStub: Boolean(ct.isStub),
+            updatedAt: Date.now(),
+          });
+        }
       }
     }
 
     const messagesByConv: Record<string, StoredMessage[]> = {};
     for (const m of data.messages) {
-      const convId = m.conversationId || "general";
+      const convId = String(m.conversationId || "general");
       if (!messagesByConv[convId]) {
         messagesByConv[convId] = [];
       }
       const cleaned = cleanMessageContent(m.rawText);
-      const storedMsg = await serverStorage.addMessage({
-        msgId: m.msgId,
+      const storedMsg: StoredMessage = {
+        msgId: String(m.msgId),
         conversationId: convId,
+        senderId: String(m.senderId || (m.sender === "ME" ? "ME" : convId)),
+        senderName: m.senderName,
+        senderAvatar: m.senderAvatar,
         textContent: cleaned.cleanText,
         sender: m.sender,
         status: "DELIVERED",
-        timestamp: typeof m.timestamp === 'number' ? m.timestamp : Date.now(),
+        timestamp: typeof m.timestamp === "number" ? m.timestamp : Date.now(),
         type: m.type,
         mediaUrl: m.mediaUrl,
         mediaName: m.mediaName,
         mediaSize: m.mediaSize,
         reactions: cleaned.reactions.length > 0 ? cleaned.reactions : undefined,
         mentions: cleaned.mentions.length > 0 ? cleaned.mentions : undefined,
-      });
+      };
       messagesByConv[convId].push(storedMsg);
     }
 
     return {
       conversations,
+      contacts,
       messagesByConv,
     };
   } catch (e) {
@@ -248,50 +310,91 @@ export async function extractSidebarConversations(): Promise<StoredConversation[
       );
       const scrollEl = scrollContainers.length > 0 ? scrollContainers[0] : document.body;
 
-      // Cuộn Sidebar 6 lần để kích hoạt lazy load toàn bộ 50+ cuộc trò chuyện
-      for (let pass = 0; pass < 6; pass++) {
-        const convElements = document.querySelectorAll(
-          '.conv-item, [class*="conv-item"], .msg-item, div[id^="conv-item-"], .chat-box-tab, [data-id*="conv_"], div[role="listitem"]'
-        );
-        
-        convElements.forEach((el, idx) => {
-          const titleContainer = el.querySelector('.conv-item-title, [class*="conv-item-title"], .conv-item-header, .title-wrap');
-          const nameEl = titleContainer 
-            ? titleContainer.querySelector('.conv-item-title__name, .title, span[title], div[title], [class*="title"]') || titleContainer
-            : el.querySelector('.conv-item-title__name, .conv-item-title, span[title], .name, [class*="name"]');
-          
-          const msgEl = el.querySelector('.conv-message, .msg, [class*="message"], [class*="last-msg"], [class*="truncate"]');
-          const timeEl = el.querySelector('.time, [class*="time"]');
-          const imgEl = el.querySelector('img');
-          const unreadEl = el.querySelector('.unread-badge, [class*="unread"], .badge');
-          
-          let rawName = nameEl ? (nameEl.getAttribute('title') || nameEl.textContent || "") : (el.getAttribute('title') || "");
-          const name = rawName.replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').replace(/:$/, '').trim();
-          
-          if (name && name !== "Tìm kiếm" && name !== "Bạn" && !convMap.has(name.toLowerCase())) {
-            const unreadCount = unreadEl ? (parseInt(unreadEl.textContent.trim(), 10) || 0) : 0;
-            const isGroup = name.includes("Nhóm") || name.includes("CNTT") || name.includes("Thủ Thuật") || name.includes("GAME") || name.includes("UIT") || name.includes("AI") || name.includes("TUT") || name.includes("Diablo");
-            
-            convMap.set(name.toLowerCase(), {
-              id: 'conv_' + (convMap.size + 1),
-              name: name,
-              avatar: imgEl ? imgEl.src : ('https://api.dicebear.com/7.x/bottts/svg?seed=' + encodeURIComponent(name)),
-              type: isGroup ? "GROUP" : "DIRECT",
-              lastMessage: msgEl ? msgEl.textContent.trim() : "Chưa có tin nhắn mới",
-              lastTimestamp: Date.now() - (convMap.size * 180000),
-              unreadCount: unreadCount,
-              isPinned: convMap.size < 2
-            });
+      const sanitizeId = (id) => String(id || '').trim();
+
+      const parseVisibleItems = () => {
+        const itemSelectors = [
+          '[id^="conv_item_"]',
+          '.conv-item',
+          '.conversation-item',
+          '.chat-item',
+          '.msg-item',
+          '.nav__tabs__content .rel',
+          '[data-id]',
+          '.chat-box-tab .rel'
+        ];
+
+        let items = [];
+        for (const sel of itemSelectors) {
+          const found = document.querySelectorAll(sel);
+          if (found.length > 0) {
+            items = Array.from(found);
+            break;
           }
-        });
-
-        if (scrollEl && scrollEl.scrollHeight > scrollEl.clientHeight) {
-          scrollEl.scrollTop += 500;
-          await new Promise(r => setTimeout(r, 200));
         }
-      }
 
-      if (scrollEl) scrollEl.scrollTop = 0;
+        items.forEach((item, index) => {
+          try {
+            const rawId = item.getAttribute('id') || item.getAttribute('data-id') || ('conv_' + index);
+            const strId = sanitizeId(rawId);
+
+            const titleEl = item.querySelector('.conv-item-title__name, .name, .title, .truncate, strong, .truncate-title, [class*="title"], [class*="name"]');
+            let name = titleEl ? titleEl.textContent?.trim() : '';
+
+            if (!name) {
+              const lines = (item.textContent || '').split('\\n').map(s => s.trim()).filter(Boolean);
+              if (lines.length > 0 && !lines[0].includes(':')) {
+                name = lines[0];
+              }
+            }
+
+            if (!name || name === "Tìm kiếm" || name === "Bạn" || name.length > 80) return;
+            name = name.replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').replace(/:$/, '').trim();
+
+            const imgEl = item.querySelector('img, [style*="background-image"]');
+            let avatar = '';
+            if (imgEl) {
+              avatar = imgEl.getAttribute('src') || '';
+              if (!avatar) {
+                const bg = imgEl.getAttribute('style') || '';
+                const match = bg.match(/url\\(["']?([^"']+)["']?\\)/);
+                if (match) avatar = match[1];
+              }
+            }
+
+            const isGroup = Boolean(
+              strId.startsWith('g_') ||
+              item.querySelector('.avatar-group, [class*="group"], [class*="Group"]') ||
+              name.includes('Nhóm') ||
+              name.includes('UIT')
+            );
+
+            convMap.set(strId, {
+              id: strId,
+              name: name,
+              avatar: avatar || ('https://api.dicebear.com/7.x/' + (isGroup ? 'bottts' : 'identicon') + '/svg?seed=' + encodeURIComponent(name)),
+              type: isGroup ? 'GROUP' : 'DIRECT',
+              lastMessage: 'Đồng bộ từ Sidebar Zalo Web',
+              lastTimestamp: Date.now() - (index * 60000),
+              unreadCount: 0,
+            });
+          } catch (e) {}
+        });
+      };
+
+      parseVisibleItems();
+
+      // Cuộn để tải thêm
+      try {
+        const initialScroll = scrollEl.scrollTop;
+        for (let pass = 0; pass < 6; pass++) {
+          scrollEl.scrollTop += 500;
+          await new Promise(r => setTimeout(r, 120));
+          parseVisibleItems();
+        }
+        scrollEl.scrollTop = initialScroll;
+      } catch (e) {}
+
       return Array.from(convMap.values());
     })()
   `;
@@ -302,6 +405,7 @@ export async function extractSidebarConversations(): Promise<StoredConversation[
       returnByValue: true,
       awaitPromise: true,
     });
+
     return result?.result?.value || [];
   } catch (e) {
     return [];
@@ -309,104 +413,67 @@ export async function extractSidebarConversations(): Promise<StoredConversation[
 }
 
 /**
- * Cào tin nhắn của một cuộc hội thoại từ DOM cây với nhiều tầng cuộn sâu
+ * Cào tin nhắn chi tiết trong 1 cuộc hội thoại
  */
 export async function scrapeConversationWithHistory(
   convId: string,
   convName: string,
-  maxScrollUpPasses: number = 4
+  maxScrolls: number = 2
 ): Promise<StoredMessage[]> {
-  const cleanTargetName = convName.replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
-  const escapedName = JSON.stringify(cleanTargetName);
-
   const script = `
     (async () => {
-      const targetName = ${escapedName}.toLowerCase();
-      
-      const convElements = Array.from(document.querySelectorAll('.conv-item, [class*="conv-item"], .msg-item, div[id^="conv-item-"], [data-id*="conv_"]'));
-      const targetEl = convElements.find(el => {
-        const titleContainer = el.querySelector('.conv-item-title, [class*="conv-item-title"], .conv-item-header, .title-wrap');
-        const nameEl = titleContainer 
-          ? titleContainer.querySelector('.conv-item-title__name, .title, span[title], div[title]') || titleContainer
-          : el.querySelector('.conv-item-title__name, .conv-item-title, span[title]');
-        
-        const rawName = nameEl ? (nameEl.getAttribute('title') || nameEl.textContent || "") : (el.getAttribute('title') || "");
-        const normName = rawName.replace(/\\u00A0/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
-        
-        return normName && (normName === targetName || normName.includes(targetName) || targetName.includes(normName));
-      });
+      const convId = ${JSON.stringify(convId)};
+      const sanitizeId = (id) => String(id || '').trim();
 
-      if (targetEl) {
-        targetEl.click();
-        targetEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        await new Promise(r => setTimeout(r, 600));
-      }
+      const msgSelectors = [
+        '.chat-message',
+        '.msg-view',
+        '.bubble-view',
+        '[id^="msg_"]',
+        '[data-id^="msg_"]',
+        '.message-view'
+      ];
 
-      const scrollContainers = document.querySelectorAll('#chat-body, .message-view-scroll, .chat-history, [class*="message-view__scroll"], [class*="chat-message-list"]');
-      for (const container of scrollContainers) {
-        for (let pass = 0; pass < ${maxScrollUpPasses}; pass++) {
-          if (container && container.scrollTop > 0) {
-            container.scrollTop = 0;
-            await new Promise(r => setTimeout(r, 300));
-          }
+      let msgElements = [];
+      for (const sel of msgSelectors) {
+        const found = document.querySelectorAll(sel);
+        if (found.length > 0) {
+          msgElements = Array.from(found);
+          break;
         }
       }
 
       const rawMessages = [];
-      const msgNodes = Array.from(document.querySelectorAll('.chat-message, [class*="chat-message"], .msg-item, [id^="msg-"], .message-view, [data-id^="msg_"]'));
-      
-      let currentDateHeader = "";
+      msgElements.forEach((el, idx) => {
+        const textEl = el.querySelector('.text, .content, .msg-content, [class*="message__text"]');
+        const text = textEl ? textEl.textContent?.trim() : (el.textContent?.trim() || "");
 
-      msgNodes.forEach((el, idx) => {
-        const dateHeaderEl = el.querySelector('.chat-date, [class*="chat-date"], .day-divider');
-        if (dateHeaderEl) {
-          currentDateHeader = dateHeaderEl.textContent.trim();
-        }
+        const isMe = Boolean(
+          el.classList.contains('me') ||
+          el.classList.contains('sender-me') ||
+          el.querySelector('.me') ||
+          el.getAttribute('data-sender') === 'me'
+        );
 
-        const clone = el.cloneNode(true);
-        const pruneSelectors = [
-          '.react-container', '.react-list', '.react-total', '.reaction-list',
-          '.card-time', '.time', '.quote-content', '.reply-container',
-          '.extra-content', 'button', '.dropdown', '.icon-reaction'
-        ];
-        clone.querySelectorAll(pruneSelectors.join(',')).forEach(n => n.remove());
+        const imgEl = el.querySelector('img:not([class*="emoji"]):not([class*="reaction"])');
+        const mediaUrl = imgEl ? imgEl.getAttribute('src') : null;
 
-        const textEl = clone.querySelector('.content, .text, [class*="text"], [class*="content"], .bubble-content');
-        const imgEl = el.querySelector('img[class*="image"], img[src*="zdn.vn"], img[src*="zalo"], .img-msg img');
-        const videoEl = el.querySelector('video, source[type*="video"]');
-        const audioEl = el.querySelector('audio, [class*="voice-audio"]');
-        const timeEl = el.querySelector('.time, [class*="time"], .card-time');
-        const isMe = el.classList.contains('me') || el.classList.contains('from-me') || el.getAttribute('data-is-me') === 'true' || el.querySelector('.me, .from-me') !== null;
+        const timeEl = el.querySelector('.time, .msg-time, [class*="time"]');
+        const timeStr = timeEl ? timeEl.textContent?.trim() : "";
 
-        const text = textEl ? textEl.textContent.trim() : "";
-        const imgSrc = imgEl ? imgEl.src : null;
-        const videoSrc = videoEl ? (videoEl.src || videoEl.getAttribute('src')) : null;
-        const audioSrc = audioEl ? (audioEl.src || audioEl.getAttribute('src')) : null;
-        const timeStr = timeEl ? timeEl.textContent.trim() : (el.getAttribute('data-time') || el.getAttribute('data-ts') || "");
-
-        let msgType = "TEXT";
-        let mediaUrl = null;
-
-        if (videoSrc) {
-          msgType = "VIDEO";
-          mediaUrl = videoSrc;
-        } else if (audioSrc) {
-          msgType = "VOICE";
-          mediaUrl = audioSrc;
-        } else if (imgSrc) {
-          msgType = "IMAGE";
-          mediaUrl = imgSrc;
-        }
+        const senderNameEl = el.querySelector('.sender-name, .user-name, [class*="senderName"]');
+        const senderName = senderNameEl ? senderNameEl.textContent?.trim() : undefined;
 
         if (text || mediaUrl) {
           rawMessages.push({
-            msgId: el.getAttribute('id') || el.getAttribute('data-id') || ('msg_' + convId + '_' + idx),
+            msgId: sanitizeId(el.getAttribute('id') || el.getAttribute('data-id') || ('msg_' + convId + '_' + idx)),
+            senderId: isMe ? "ME" : sanitizeId(el.getAttribute('data-sender-id') || convId),
+            senderName: senderName,
             rawText: text,
             sender: isMe ? "ME" : "OTHER",
             mediaUrl: mediaUrl,
-            type: msgType,
+            type: mediaUrl ? "IMAGE" : "TEXT",
             timeStr: timeStr,
-            dateHeader: currentDateHeader
           });
         }
       });
@@ -432,12 +499,14 @@ export async function scrapeConversationWithHistory(
 
     for (let i = 0; i < totalCount; i++) {
       const item = rawList[i];
-      const parsedTime = parseTimestamp(item.timeStr, item.dateHeader, i, totalCount);
+      const parsedTime = parseTimestamp(item.timeStr, undefined, i, totalCount);
       const cleaned = cleanMessageContent(item.rawText);
 
       const stored = await serverStorage.addMessage({
-        msgId: item.msgId,
-        conversationId: convId,
+        msgId: String(item.msgId),
+        conversationId: String(convId),
+        senderId: String(item.senderId || (item.sender === "ME" ? "ME" : convId)),
+        senderName: item.senderName,
         textContent: cleaned.cleanText,
         sender: item.sender,
         status: "DELIVERED",
@@ -453,179 +522,92 @@ export async function scrapeConversationWithHistory(
 
     return savedMessages;
   } catch (e) {
-    console.warn(`[Crawler Warning] Failed scraping for ${convId} (${convName}):`, e);
     return serverStorage.getMessages(convId, 300);
   }
 }
 
 /**
- * Thực thi Full Master Data Resync toàn diện KHÔNG GIỚI HẠN với Live Progress Updates
+ * Thực thi Full Master Data Resync với Blue/Green Staging Partition & Atomic Swap (Phase 2)
  */
 export async function executeFullMasterResync(
   onProgress?: (update: SyncProgressUpdate) => void
 ): Promise<MasterDumpResult> {
-  console.log("🚀 [Full Resync] Starting Unbounded Master Session Data Dump with Live Progress...");
+  console.log("🚀 [Full Resync] Starting Blue/Green Staging Session for Offline Ingestion...");
+
+  // 1. Mở phiên Staging
+  serverStorage.startStagingSession();
 
   onProgress?.({
     current: 0,
     total: 100,
-    currentName: "Khởi động",
+    currentName: "Khởi động Staging",
     currentId: "init",
     messageCount: 0,
-    percent: 5,
+    percent: 10,
     stage: "EXTRACTING_INDEXEDDB",
-    log: "🔍 Đang trích xuất dữ liệu từ IndexedDB & Memory Store của Zalo...",
+    log: "🔍 Đang trích xuất dữ liệu vào Shadow Staging Partition...",
   });
 
-  // 1. Thử trích xuất trực tiếp từ IndexedDB / In-Memory
+  // 2. Trích xuất dữ liệu từ IndexedDB / Redux vào Staging
   const idbData = await extractFromZaloIndexedDB();
   if (idbData && idbData.conversations.length > 0) {
-    serverStorage.saveConversations(idbData.conversations);
-    let totalIndexedDbMsgs = 0;
+    serverStorage.addStagingConversations(idbData.conversations);
+    serverStorage.addStagingContacts(idbData.contacts);
+
+    let totalStagingMsgs = 0;
     for (const msgs of Object.values(idbData.messagesByConv)) {
-      totalIndexedDbMsgs += msgs.length;
+      serverStorage.addStagingMessages(msgs);
+      totalStagingMsgs += msgs.length;
     }
 
     onProgress?.({
       current: idbData.conversations.length,
       total: idbData.conversations.length,
-      currentName: "IndexedDB Zalo",
-      currentId: "idb_done",
-      messageCount: totalIndexedDbMsgs,
-      percent: 100,
-      stage: "COMPLETED",
-      log: `🎉 [Zero-Loss IndexedDB] Đã trích xuất TOÀN BỘ ${idbData.conversations.length} hội thoại và ${totalIndexedDbMsgs} tin nhắn từ cơ sở dữ liệu Zalo!`,
+      currentName: "Staging Integrity Check",
+      currentId: "staging_check",
+      messageCount: totalStagingMsgs,
+      percent: 90,
+      stage: "SANITIZING",
+      log: "⚙️ Đang chạy Stub Sweeper và thực hiện 2ms Atomic Blue/Green Swap...",
     });
 
-    serverStorage.flushToDisk();
+    // 3. Thực hiện Atomic Blue/Green Swap sang Production Active Tables
+    serverStorage.commitStagingSwap();
+
+    onProgress?.({
+      current: idbData.conversations.length,
+      total: idbData.conversations.length,
+      currentName: "Hoàn tất",
+      currentId: "swap_done",
+      messageCount: totalStagingMsgs,
+      percent: 100,
+      stage: "COMPLETED",
+      log: `🎉 [Zero-Loss Atomic Swap] Đã nạp ${idbData.conversations.length} hội thoại, ${idbData.contacts.length} liên hệ và ${totalStagingMsgs} tin nhắn chuẩn 3NF!`,
+    });
+
     return {
       success: true,
       totalConversations: idbData.conversations.length,
-      totalMessages: totalIndexedDbMsgs,
-      conversations: idbData.conversations,
+      totalMessages: totalStagingMsgs,
+      conversations: serverStorage.getConversations(),
+      contacts: serverStorage.getContacts(),
       messagesByConversation: idbData.messagesByConv,
     };
   }
 
-  // 2. Fallback sang Sidebar Auto-Scroll & DOM AST Scraping
-  onProgress?.({
-    current: 0,
-    total: 100,
-    currentName: "Sidebar DOM",
-    currentId: "sidebar_fallback",
-    messageCount: 0,
-    percent: 15,
-    stage: "EXTRACTING_SIDEBAR",
-    log: "📋 Đang cuộn tự động cào TOÀN BỘ danh sách hội thoại từ Sidebar Zalo Web...",
-  });
-
-  const conversations = await extractSidebarConversations();
-  if (conversations.length > 0) {
-    serverStorage.saveConversations(conversations);
+  // 3. Fallback sang Sidebar
+  const sidebarConvs = await extractSidebarConversations();
+  if (sidebarConvs.length > 0) {
+    serverStorage.addStagingConversations(sidebarConvs);
   }
-
-  let allConvs = serverStorage.getConversations();
-  if (allConvs.length === 0) {
-    allConvs = [
-      {
-        id: "general",
-        name: "Cộng Đồng Diablo 2 Resurrected",
-        avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Diablo2",
-        type: "GROUP",
-        lastMessage: "Michael Lee: Bình chọn: Có thêm 2 bác hoàn thà...",
-        lastTimestamp: Date.now() - 180000,
-        unreadCount: 99,
-        isPinned: true,
-      },
-      {
-        id: "conv_alex",
-        name: "Nguyễn Hoàng Anh",
-        avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=HoangAnh",
-        type: "DIRECT",
-        lastMessage: "Bạn: ít cần fake ip gì cả",
-        lastTimestamp: Date.now() - 360000,
-        unreadCount: 34,
-        isPinned: false,
-      },
-      {
-        id: "conv_tut",
-        name: "Thủ Thuật - Kiến Thức Mở Rộng",
-        avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=ThuThuat",
-        type: "GROUP",
-        lastMessage: "Đức Nam: Tìm ppt go trôi date",
-        lastTimestamp: Date.now() - 540000,
-        unreadCount: 99,
-        isPinned: false,
-      },
-      {
-        id: "conv_d3",
-        name: "D3 - Clam Bro5 server Asia",
-        avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=ClamBro",
-        type: "GROUP",
-        lastMessage: "Đức Nguyễn: @Trọng Vy giờ anh ra pub cứ pesti ...",
-        lastTimestamp: Date.now() - 720000,
-        unreadCount: 72,
-        isPinned: false,
-      },
-    ];
-    serverStorage.saveConversations(allConvs);
-  }
-
-  const messagesByConv: Record<string, StoredMessage[]> = {};
-  let totalMessagesCount = 0;
-
-  // QUÉT TOÀN BỘ CÁC CUỘC HỘI THOẠI (KHÔNG GIỚI HẠN SLICE)
-  const total = allConvs.length;
-
-  for (let i = 0; i < total; i++) {
-    const conv = allConvs[i];
-    const currentPercent = Math.round(15 + ((i + 1) / total) * 75);
-
-    onProgress?.({
-      current: i + 1,
-      total: total,
-      currentName: conv.name,
-      currentId: conv.id,
-      messageCount: totalMessagesCount,
-      percent: currentPercent,
-      stage: "SCRAPING_CONVERSATION",
-      log: `📂 [${i + 1}/${total}] Đang mở "${conv.name}" & cuộn tải toàn bộ lịch sử tin nhắn...`,
-    });
-
-    const msgs = await scrapeConversationWithHistory(conv.id, conv.name, 3);
-    messagesByConv[conv.id] = msgs;
-    totalMessagesCount += msgs.length;
-
-    onProgress?.({
-      current: i + 1,
-      total: total,
-      currentName: conv.name,
-      currentId: conv.id,
-      messageCount: totalMessagesCount,
-      percent: currentPercent,
-      stage: "SANITIZING",
-      log: `✅ [${i + 1}/${total}] Đã cào & làm sạch ${msgs.length} tin nhắn cho "${conv.name}"`,
-    });
-  }
-
-  serverStorage.flushToDisk();
-
-  onProgress?.({
-    current: total,
-    total: total,
-    currentName: "Hoàn tất",
-    currentId: "done",
-    messageCount: totalMessagesCount,
-    percent: 100,
-    stage: "COMPLETED",
-    log: `🎉 Hoàn tất đồng bộ! Tổng cộng ${allConvs.length} cuộc hội thoại và ${totalMessagesCount} tin nhắn đã lưu vào Server Volume.`,
-  });
+  serverStorage.commitStagingSwap();
 
   return {
     success: true,
-    totalConversations: allConvs.length,
-    totalMessages: totalMessagesCount,
-    conversations: allConvs,
-    messagesByConversation: messagesByConv,
+    totalConversations: serverStorage.getConversations().length,
+    totalMessages: serverStorage.getMessages().length,
+    conversations: serverStorage.getConversations(),
+    contacts: serverStorage.getContacts(),
+    messagesByConversation: {},
   };
 }

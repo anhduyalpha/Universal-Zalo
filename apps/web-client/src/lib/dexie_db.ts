@@ -17,9 +17,18 @@ export interface MentionToken {
   endIndex: number;
 }
 
+export interface Contact {
+  id: string; // Contact UID (always String)
+  displayName: string;
+  avatarUrl: string;
+  isStub?: boolean;
+  updatedAt: number;
+}
+
 export interface LocalMessage {
-  msgId: string;
-  conversationId: string;
+  msgId: string; // Message ID (always String)
+  conversationId: string; // Thread ID (FK)
+  senderId?: string; // Author Contact UID (FK)
   textContent: string;
   sender: SenderType;
   senderName?: string;
@@ -41,7 +50,7 @@ export interface LocalMessage {
 }
 
 export interface Conversation {
-  id: string; // conversationId
+  id: string; // Thread ID (always String)
   name: string;
   avatar: string;
   type: "DIRECT" | "GROUP";
@@ -63,52 +72,38 @@ export function deduplicateById<T extends { id?: string | number; msgId?: string
   return Array.from(map.values());
 }
 
-export function deduplicateConversationsByName(convs: Conversation[]): Conversation[] {
-  const map = new Map<string, Conversation>();
-  for (const c of convs) {
-    const norm = c.name.trim().toLowerCase();
-    if (!norm) continue;
-    if (map.has(norm)) {
-      const existing = map.get(norm)!;
-      if (c.lastTimestamp > existing.lastTimestamp) {
-        existing.lastTimestamp = c.lastTimestamp;
-        existing.lastMessage = c.lastMessage;
-      }
-      if (c.avatar && !c.avatar.includes("dicebear") && existing.avatar.includes("dicebear")) {
-        existing.avatar = c.avatar;
-      }
-      map.set(norm, existing);
-    } else {
-      map.set(norm, { ...c });
-    }
-  }
-  return Array.from(map.values()).sort((a, b) => b.lastTimestamp - a.lastTimestamp);
-}
-
+/**
+ * 3NF CLIENT-SIDE INDEXEDDB DATABASE (Enterprise Edition)
+ */
 export class ZaloLocalDatabase extends Dexie {
   messages!: Table<LocalMessage, string>;
   conversations!: Table<Conversation, string>;
+  contacts!: Table<Contact, string>;
 
   constructor() {
-    // Sử dụng tên cơ sở dữ liệu mới để loại bỏ hoàn toàn xung đột Primary Key từ các phiên bản cũ
-    super("UniversalZaloMasterDB_v1");
+    super("UniversalZaloMasterDB_3NF");
     this.version(1).stores({
-      messages: "msgId, conversationId, sender, status, timestamp, type",
+      messages: "msgId, conversationId, senderId, sender, status, timestamp, type",
       conversations: "id, name, type, lastTimestamp, unreadCount, isPinned",
+      contacts: "id, displayName, updatedAt",
     });
   }
 
   /**
-   * Transactional Atomic State Reconcile: Đối soát và nạp sạch toàn bộ tin nhắn & hội thoại
+   * Transactional Atomic State Reconcile: Đối soát và nạp sạch toàn bộ 3NF tables
    */
   async reconcileFullState(
     newConversations: Conversation[],
-    newMessagesMap: Record<string, LocalMessage[]>
+    newMessagesMap: Record<string, LocalMessage[]>,
+    newContacts: Contact[] = []
   ) {
     try {
-      const dedupedConvs = deduplicateConversationsByName(newConversations);
-      if (dedupedConvs.length > 0) {
-        await this.conversations.bulkPut(dedupedConvs);
+      if (newConversations.length > 0) {
+        await this.conversations.bulkPut(deduplicateById(newConversations));
+      }
+
+      if (newContacts.length > 0) {
+        await this.contacts.bulkPut(deduplicateById(newContacts));
       }
 
       const allMessages: LocalMessage[] = [];
@@ -118,7 +113,9 @@ export class ZaloLocalDatabase extends Dexie {
             if (msg && msg.msgId) {
               allMessages.push({
                 ...msg,
-                conversationId: msg.conversationId || convId,
+                msgId: String(msg.msgId),
+                conversationId: String(msg.conversationId || convId),
+                senderId: String(msg.senderId || (msg.sender === "ME" ? "ME" : convId)),
               });
             }
           }
@@ -132,14 +129,22 @@ export class ZaloLocalDatabase extends Dexie {
     } catch (e) {
       console.warn("Reconcile state warning, falling back to individual put:", e);
       for (const conv of newConversations) {
-        try { await this.conversations.put(conv); } catch {}
+        try { await this.conversations.put({ ...conv, id: String(conv.id) }); } catch {}
+      }
+      for (const ct of newContacts) {
+        try { await this.contacts.put({ ...ct, id: String(ct.id) }); } catch {}
       }
       for (const [convId, msgs] of Object.entries(newMessagesMap)) {
         if (Array.isArray(msgs)) {
           for (const msg of msgs) {
             if (msg && msg.msgId) {
               try {
-                await this.messages.put({ ...msg, conversationId: msg.conversationId || convId });
+                await this.messages.put({
+                  ...msg,
+                  msgId: String(msg.msgId),
+                  conversationId: String(msg.conversationId || convId),
+                  senderId: String(msg.senderId || (msg.sender === "ME" ? "ME" : convId)),
+                });
               } catch {}
             }
           }
@@ -159,52 +164,9 @@ if (typeof window !== "undefined") {
       try {
         await Dexie.delete("UniversalZaloDB");
         await Dexie.delete("UniversalZaloMasterDB_v1");
+        await Dexie.delete("UniversalZaloMasterDB_3NF");
         window.location.reload();
       } catch (delErr) {}
     }
   });
-}
-
-// Seed initial default conversations if DB is empty
-export async function seedInitialConversations() {
-  try {
-    const count = await db.conversations.count();
-    if (count === 0) {
-      await db.conversations.bulkPut([
-        {
-          id: "general",
-          name: "Cộng Đồng Diablo 2 Resurrected",
-          avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Diablo2",
-          type: "GROUP",
-          lastMessage: "Michael Lee: Bình chọn: Có thêm 2 bác hoàn thà...",
-          lastTimestamp: Date.now() - 180000,
-          unreadCount: 99,
-          isPinned: true,
-          isOnline: true,
-        },
-        {
-          id: "conv_alex",
-          name: "Nguyễn Hoàng Anh",
-          avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=HoangAnh",
-          type: "DIRECT",
-          lastMessage: "Bạn: ít cần fake ip gì cả",
-          lastTimestamp: Date.now() - 360000,
-          unreadCount: 34,
-          isPinned: false,
-          isOnline: true,
-        },
-        {
-          id: "conv_tut",
-          name: "Thủ Thuật - Kiến Thức Mở Rộng",
-          avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=ThuThuat",
-          type: "GROUP",
-          lastMessage: "Đức Nam: Tìm ppt go trôi date",
-          lastTimestamp: Date.now() - 540000,
-          unreadCount: 99,
-          isPinned: false,
-          isOnline: true,
-        },
-      ]);
-    }
-  } catch (e) {}
 }

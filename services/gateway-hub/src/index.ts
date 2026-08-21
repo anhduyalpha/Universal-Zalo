@@ -3,9 +3,9 @@ import { WebSocketServer, WebSocket } from "ws";
 import { TokenBucketLimiter } from "./token_bucket.js";
 import { HybridLogicalClock } from "./hlc.js";
 import { nanoid } from "nanoid";
-import { serverStorage, StoredMessage, StoredConversation } from "./storage.js";
-import { cleanMessageContent, ParsedReaction } from "./normalizer.js";
-import { executeFullMasterResync, scrapeConversationWithHistory, extractSidebarConversations, extractFromZaloIndexedDB, SyncProgressUpdate } from "./crawler.js";
+import { serverStorage, StoredMessage, StoredConversation, StoredContact } from "./storage.js";
+import { cleanMessageContent } from "./normalizer.js";
+import { executeFullMasterResync, scrapeConversationWithHistory, extractSidebarConversations } from "./crawler.js";
 import { cdpClient } from "./cdp_client.js";
 import { singleWriterQueue, CdcEvent } from "./queue_writer.js";
 import { inContextHook } from "./in_context_hook.js";
@@ -15,11 +15,13 @@ import path from "path";
 import crypto from "crypto";
 
 interface ClientMessage {
-  type: "SEND_MESSAGE" | "PING" | "CLICK" | "TYPE" | "WHEEL" | "START_STREAM" | "STOP_STREAM" | "SELECT_CONVERSATION" | "START_LIVE_SYNC";
+  type: "SEND_MESSAGE" | "PING" | "CLICK" | "TYPE" | "WHEEL" | "START_STREAM" | "STOP_STREAM" | "SELECT_CONVERSATION" | "START_LIVE_SYNC" | "OUTBOUND_SEND";
   conversationId?: string;
+  targetId?: string;
   conversationName?: string;
   textContent?: string;
   idempotencyKey?: string;
+  clientMsgId?: string;
   mediaUrl?: string;
   mediaType?: "TEXT" | "IMAGE" | "VIDEO" | "FILE" | "VOICE" | "STICKER";
   x?: number;
@@ -34,6 +36,7 @@ const limiter = new TokenBucketLimiter(10, 4);
 const hlc = new HybridLogicalClock();
 const connectedClients = new Set<WebSocket>();
 const streamingClients = new Set<WebSocket>();
+const sseClients = new Set<http.ServerResponse>();
 
 // Khởi tạo kết nối CDP Singleton Pool & In-Context Hook Engine
 cdpClient.connect().then(() => {
@@ -60,6 +63,16 @@ cdpClient.on("screencast_frame", (base64Data: string) => {
   }
 });
 
+// Lắng nghe thay đổi trạng thái Hydration FSM để phát tới SSE Clients
+serverStorage.on("state_changed", (stateInfo) => {
+  const sseData = `data: ${JSON.stringify(stateInfo)}\n\n`;
+  for (const res of sseClients) {
+    try {
+      res.write(sseData);
+    } catch (e) {}
+  }
+});
+
 // Hook Real-time Change Data Capture (CDC) events từ Single-Writer Engine
 singleWriterQueue.on("cdc_event", (cdcEvent: CdcEvent) => {
   const cdcPayload = JSON.stringify({
@@ -81,6 +94,7 @@ singleWriterQueue.on("cdc_event", (cdcEvent: CdcEvent) => {
       event: "MESSAGE_FANOUT",
       msgId: msg.msgId,
       conversationId: msg.conversationId,
+      senderId: msg.senderId,
       textContent: msg.textContent,
       sender: msg.sender,
       mediaUrl: msg.mediaUrl,
@@ -99,18 +113,19 @@ singleWriterQueue.on("cdc_event", (cdcEvent: CdcEvent) => {
   }
 });
 
-// Background Sync Loop
-async function runBackgroundMessageIngestion() {
-  try {
-    const convs = serverStorage.getConversations();
-    if (convs.length > 0) {
-      const activeConv = convs[0];
-      await scrapeConversationWithHistory(activeConv.id, activeConv.name, 1);
+// Lắng nghe cập nhật trạng thái Outbound Lifecycle
+singleWriterQueue.on("outbound_status", (statusUpdate) => {
+  const payload = JSON.stringify({
+    event: "OUTBOUND_STATUS_UPDATE",
+    ...statusUpdate,
+    timestamp: Date.now(),
+  });
+  for (const client of connectedClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(payload);
     }
-  } catch (e) {}
-}
-
-setInterval(runBackgroundMessageIngestion, 15000);
+  }
+});
 
 function parseBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -146,7 +161,7 @@ function generateSvgAvatar(name: string): string {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range, Authorization");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -154,7 +169,173 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 1. Screenshot Endpoint (`/qr` hoặc `/api/qr`)
+  // 1. HYDRATION GATEKEEPER SSE STATUS ENDPOINT (`/api/sync/status`)
+  if (req.url === "/api/sync/status" || req.url === "/sync/status") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
+    sseClients.add(res);
+
+    // Gửi trạng thái hiện tại ngay khi kết nối
+    res.write(`data: ${JSON.stringify(serverStorage.getHydrationState())}\n\n`);
+
+    req.on("close", () => {
+      sseClients.delete(res);
+    });
+    return;
+  }
+
+  // 2. AVATAR PROXY ENDPOINT (`/api/media/avatar`)
+  if (req.url?.startsWith("/api/media/avatar") || req.url?.startsWith("/media/avatar")) {
+    const urlObj = new URL(req.url, `http://localhost:${PORT}`);
+    const contactId = urlObj.searchParams.get("id") || "";
+    const name = urlObj.searchParams.get("name") || "Z";
+
+    const contact = contactId ? serverStorage.getContact(contactId) : undefined;
+    const targetUrl = contact?.avatarUrl || urlObj.searchParams.get("url");
+
+    if (!targetUrl || targetUrl.includes("dicebear")) {
+      const svg = generateSvgAvatar(contact?.displayName || name);
+      res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+      res.end(svg);
+      return;
+    }
+
+    try {
+      let cookieHeader = "";
+      try {
+        const cookieRes = await cdpClient.send("Network.getCookies", {
+          urls: ["https://chat.zalo.me", "https://zalo.me"],
+        });
+        if (cookieRes?.cookies && Array.isArray(cookieRes.cookies)) {
+          cookieHeader = cookieRes.cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
+        }
+      } catch (cErr) {}
+
+      const upstream = await fetch(targetUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          Referer: "https://chat.zalo.me/",
+          Cookie: cookieHeader,
+        },
+      });
+
+      if (upstream.ok) {
+        const buffer = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(200, {
+          "Content-Type": upstream.headers.get("Content-Type") || "image/jpeg",
+          "Content-Length": buffer.length,
+          "Cache-Control": "public, max-age=86400",
+        });
+        res.end(buffer);
+        return;
+      }
+    } catch (e) {}
+
+    const svg = generateSvgAvatar(contact?.displayName || name);
+    res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+    res.end(svg);
+    return;
+  }
+
+  // 3. HEADLESS OUTBOUND MESSAGE API (`/api/outbound/send`)
+  if ((req.url === "/api/outbound/send" || req.url === "/api/send") && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const targetId = String(body.targetId || body.conversationId || "");
+      const content = String(body.content || body.textContent || "");
+      const clientMsgId = String(body.clientMsgId || nanoid());
+
+      if (!targetId || !content) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, error: "Missing targetId or content" }));
+        return;
+      }
+
+      // Đăng ký Outbound Lifecycle FSM
+      singleWriterQueue.registerOutboundPending(clientMsgId, targetId, content);
+
+      // Lưu tin nhắn cục bộ ở trạng thái SENDING
+      await serverStorage.addMessage({
+        msgId: clientMsgId,
+        conversationId: targetId,
+        senderId: "ME",
+        textContent: content,
+        sender: "ME",
+        status: "SENDING",
+        timestamp: Date.now(),
+        type: "TEXT",
+      });
+
+      // Dispatch qua In-Memory Headless Dispatcher
+      const dispatchRes = await inContextHook.sendHeadlessMessage(targetId, content);
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, clientMsgId, dispatchResult: dispatchRes }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: e.message }));
+    }
+    return;
+  }
+
+  // 4. NATIVE MEDIA UPLOAD PROXY (`/api/outbound/media`)
+  if (req.url === "/api/outbound/media" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const targetId = String(body.targetId || body.conversationId || "general");
+      const base64Data = body.data || body.fileBase64;
+      const filename = body.filename || `upload_${Date.now()}.png`;
+
+      if (!base64Data) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "No file data provided" }));
+        return;
+      }
+
+      const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, "");
+      const buffer = Buffer.from(cleanBase64, "base64");
+      const hash = crypto.createHash("md5").update(buffer).digest("hex");
+      const ext = path.extname(filename) || ".png";
+      const localRelPath = `images/${hash}${ext}`;
+      const fullPath = path.join("/app/data/media", localRelPath);
+
+      fs.writeFileSync(fullPath, buffer);
+      const localUrl = `/api/media/${localRelPath}`;
+      const clientMsgId = nanoid();
+
+      singleWriterQueue.enqueueRealtime({
+        msgId: clientMsgId,
+        conversationId: targetId,
+        senderId: "ME",
+        textContent: body.caption || "",
+        sender: "ME",
+        status: "DELIVERED",
+        timestamp: Date.now(),
+        type: "IMAGE",
+        mediaUrl: localUrl,
+        mediaName: filename,
+        mediaSize: buffer.length,
+      });
+
+      // Dispatch headless attachment
+      await inContextHook.sendHeadlessMessage(targetId, body.caption || "", {
+        mediaUrl: localUrl,
+        filename,
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, url: localUrl, msgId: clientMsgId }));
+    } catch (e: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // 5. Screenshot Endpoint (`/qr` hoặc `/api/qr`)
   if (req.url?.startsWith("/qr") || req.url?.startsWith("/api/qr")) {
     try {
       const result = await cdpClient.send("Page.captureScreenshot", {
@@ -182,7 +363,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. AUTHENTICATED STREAMING MEDIA PROXY (`/api/media/proxy` & `/api/media/*`)
+  // 6. STREAMING MEDIA PROXY (`/api/media/*`)
   if (req.url?.startsWith("/api/media/") || req.url?.startsWith("/media/")) {
     if (req.url.startsWith("/api/media/proxy") || req.url.startsWith("/media/proxy")) {
       const urlObj = new URL(req.url, `http://localhost:${PORT}`);
@@ -208,18 +389,14 @@ const server = http.createServer(async (req, res) => {
         } catch (cErr) {}
 
         const headers: Record<string, string> = {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
           Referer: "https://chat.zalo.me/",
           Origin: "https://chat.zalo.me",
         };
-        if (cookieHeader) {
-          headers["Cookie"] = cookieHeader;
-        }
+        if (cookieHeader) headers["Cookie"] = cookieHeader;
 
         const clientRange = req.headers["range"];
-        if (clientRange) {
-          headers["Range"] = clientRange;
-        }
+        if (clientRange) headers["Range"] = clientRange;
 
         const upstream = await fetch(targetUrl, { headers });
 
@@ -267,12 +444,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3. TOÀN DIỆN: FULL MASTER SESSION DATA DUMP & RESYNC
+  // 7. FULL MASTER DATA RESYNC VỚI BLUE/GREEN STAGING SWAP
   if ((req.url === "/api/sync/full-resync" || req.url === "/api/sync/full") && req.method === "POST") {
     try {
-      console.log("⚡ Triggering Full Master Data Resync via API (Chunked + Cursor Engine)...");
-      
-      // Khởi động Chunked IDBCursor Sync ngầm
+      console.log("⚡ Triggering Full Master Data Resync (Blue/Green Staging + Atomic Swap)...");
       chunkedSync.executeChunkedSync().catch(() => {});
 
       const dumpResult = await executeFullMasterResync((update) => {
@@ -292,58 +467,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 4. Upload File / Media từ PWA lên Server Volume (`/api/upload`)
-  if (req.url === "/api/upload" && req.method === "POST") {
-    try {
-      const body = await parseBody(req);
-      const base64Data = body.data || body.fileBase64;
-      const originalName = body.filename || `upload_${Date.now()}.png`;
-      const convId = body.conversationId || "general";
-
-      if (!base64Data) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "No file data provided" }));
-        return;
-      }
-
-      const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, "");
-      const buffer = Buffer.from(cleanBase64, "base64");
-      const hash = crypto.createHash("md5").update(buffer).digest("hex");
-      const ext = path.extname(originalName) || ".png";
-      const filename = `images/${hash}${ext}`;
-      const fullPath = path.join("/app/data/media", filename);
-
-      fs.writeFileSync(fullPath, buffer);
-
-      const localUrl = `/api/media/${filename}`;
-      const msgId = nanoid();
-
-      const task = {
-        msgId,
-        conversationId: convId,
-        textContent: body.caption || "",
-        sender: "ME" as const,
-        status: "DELIVERED" as const,
-        timestamp: Date.now(),
-        type: "IMAGE" as const,
-        mediaUrl: localUrl,
-        mediaName: originalName,
-        mediaSize: buffer.length,
-      };
-
-      singleWriterQueue.enqueueRealtime(task);
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: true, url: localUrl, msgId }));
-    } catch (e: any) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: e.message }));
-    }
+  // 8. CONTACTS API (`/api/contacts`)
+  if (req.url?.startsWith("/api/contacts") && req.method === "GET") {
+    const contacts = serverStorage.getContacts();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(contacts));
     return;
   }
 
-  // 5. Lấy danh sách tin nhắn từ Server Volume & Tự động cào từ Zalo Web (`/api/messages`)
+  // 9. MESSAGES API VỚI 503 HYDRATION GUARD
   if (req.url?.startsWith("/api/messages") && req.method === "GET") {
+    if (!serverStorage.isHydrated() && serverStorage.getConversations().length === 0) {
+      res.writeHead(503, { "Content-Type": "application/json", "Retry-After": "2" });
+      res.end(JSON.stringify({ error: "Storage is syncing in staging", state: serverStorage.getHydrationState() }));
+      return;
+    }
+
     const urlObj = new URL(req.url, `http://localhost:${PORT}`);
     const convId = urlObj.searchParams.get("conversationId") || undefined;
     const convName = urlObj.searchParams.get("convName") || undefined;
@@ -362,160 +501,65 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 6. Trích xuất danh sách hội thoại (`/api/conversations`)
+  // 10. CONVERSATIONS API VỚI 503 HYDRATION GUARD
   if (req.url === "/api/conversations" || req.url === "/conversations") {
-    try {
-      let convs = serverStorage.getConversations();
-      if (convs.length === 0) {
-        const liveConvs = await extractSidebarConversations();
-        if (liveConvs.length > 0) {
-          serverStorage.saveConversations(liveConvs);
-          convs = serverStorage.getConversations();
-        }
+    if (!serverStorage.isHydrated() && serverStorage.getConversations().length === 0) {
+      res.writeHead(503, { "Content-Type": "application/json", "Retry-After": "2" });
+      res.end(JSON.stringify({ error: "Storage is syncing in staging", state: serverStorage.getHydrationState() }));
+      return;
+    }
+
+    let convs = serverStorage.getConversations();
+    if (convs.length === 0) {
+      const liveConvs = await extractSidebarConversations();
+      if (liveConvs.length > 0) {
+        serverStorage.saveConversations(liveConvs);
+        convs = serverStorage.getConversations();
       }
-
-      if (convs.length === 0) {
-        convs = [
-          {
-            id: "general",
-            name: "Cộng Đồng Diablo 2 Resurrected",
-            avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Diablo2",
-            type: "GROUP",
-            lastMessage: "Michael Lee: Bình chọn: Có thêm 2 bác hoàn thà...",
-            lastTimestamp: Date.now() - 180000,
-            unreadCount: 99,
-            isPinned: true,
-          },
-          {
-            id: "conv_alex",
-            name: "Nguyễn Hoàng Anh",
-            avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=HoangAnh",
-            type: "DIRECT",
-            lastMessage: "Bạn: ít cần fake ip gì cả",
-            lastTimestamp: Date.now() - 360000,
-            unreadCount: 34,
-            isPinned: false,
-          },
-          {
-            id: "conv_tut",
-            name: "Thủ Thuật - Kiến Thức Mở Rộng",
-            avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=ThuThuat",
-            type: "GROUP",
-            lastMessage: "Đức Nam: Tìm ppt go trôi date",
-            lastTimestamp: Date.now() - 540000,
-            unreadCount: 99,
-            isPinned: false,
-          },
-        ];
-        serverStorage.saveConversations(convs);
-      }
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(convs));
-    } catch (e: any) {
-      const allConvs = serverStorage.getConversations();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(allConvs.length > 0 ? allConvs : []));
     }
+
+    if (convs.length === 0) {
+      convs = [
+        {
+          id: "general",
+          name: "Cộng Đồng Diablo 2 Resurrected",
+          avatar: "https://api.dicebear.com/7.x/bottts/svg?seed=Diablo2",
+          type: "GROUP",
+          lastMessage: "Michael Lee: Bình chọn: Có thêm 2 bác hoàn thà...",
+          lastTimestamp: Date.now() - 180000,
+          unreadCount: 99,
+          isPinned: true,
+        },
+        {
+          id: "conv_alex",
+          name: "Nguyễn Hoàng Anh",
+          avatar: "https://api.dicebear.com/7.x/identicon/svg?seed=HoangAnh",
+          type: "DIRECT",
+          lastMessage: "Bạn: ít cần fake ip gì cả",
+          lastTimestamp: Date.now() - 360000,
+          unreadCount: 34,
+          isPinned: false,
+        },
+      ];
+      serverStorage.saveConversations(convs);
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(convs));
     return;
   }
 
-  // 7. Action Endpoints (Click, Wheel, Type)
-  if (req.url === "/api/action/click" && req.method === "POST") {
-    try {
-      const body = await parseBody(req);
-      const x = Math.round(Number(body.x) || 0);
-      const y = Math.round(Number(body.y) || 0);
-
-      await cdpClient.send("Input.dispatchMouseEvent", {
-        type: "mousePressed",
-        button: "left",
-        clickCount: 1,
-        x: x,
-        y: y,
-      });
-
-      await cdpClient.send("Input.dispatchMouseEvent", {
-        type: "mouseReleased",
-        button: "left",
-        clickCount: 1,
-        x: x,
-        y: y,
-      });
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: true, message: `Clicked at (${x}, ${y})` }));
-    } catch (e: any) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: false, error: e.message }));
-    }
-    return;
-  }
-
-  if (req.url === "/api/action/wheel" && req.method === "POST") {
-    try {
-      const body = await parseBody(req);
-      const x = Math.round(Number(body.x) || 0);
-      const y = Math.round(Number(body.y) || 0);
-      const deltaX = Number(body.deltaX) || 0;
-      const deltaY = Number(body.deltaY) || 0;
-
-      await cdpClient.send("Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: x,
-        y: y,
-        deltaX: deltaX,
-        deltaY: deltaY,
-      });
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: true, message: `Scrolled delta (${deltaX}, ${deltaY})` }));
-    } catch (e: any) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: false, error: e.message }));
-    }
-    return;
-  }
-
-  if (req.url === "/api/action/type" && req.method === "POST") {
-    try {
-      const body = await parseBody(req);
-      const text = String(body.text || "");
-      const pressEnter = Boolean(body.pressEnter !== false);
-
-      if (text) {
-        await cdpClient.send("Input.insertText", { text: text });
-
-        if (pressEnter) {
-          await cdpClient.send("Input.dispatchKeyEvent", {
-            type: "rawKeyDown",
-            key: "Enter",
-            code: "Enter",
-            windowsVirtualKeyCode: 13,
-            text: "\r",
-          });
-          await cdpClient.send("Input.dispatchKeyEvent", {
-            type: "keyUp",
-            key: "Enter",
-            code: "Enter",
-            windowsVirtualKeyCode: 13,
-          });
-        }
-      }
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: true, message: `Inserted text: ${text}` }));
-    } catch (e: any) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: false, error: e.message }));
-    }
-    return;
-  }
-
-  // 8. Health check
+  // 11. Health check
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "OK", activeClients: connectedClients.size, totalSavedMessages: serverStorage.getMessages().length }));
+    res.end(JSON.stringify({
+      status: "OK",
+      hydration: serverStorage.getHydrationState(),
+      activeClients: connectedClients.size,
+      totalConversations: serverStorage.getConversations().length,
+      totalContacts: serverStorage.getContacts().length,
+      totalMessages: serverStorage.getMessages().length,
+    }));
     return;
   }
 
@@ -595,67 +639,8 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      if (msg.type === "CLICK" && msg.x !== undefined && msg.y !== undefined) {
-        const clickX = Math.round(msg.x);
-        const clickY = Math.round(msg.y);
-        try {
-          await cdpClient.send("Input.dispatchMouseEvent", {
-            type: "mousePressed",
-            button: "left",
-            clickCount: 1,
-            x: clickX,
-            y: clickY,
-          });
-          await cdpClient.send("Input.dispatchMouseEvent", {
-            type: "mouseReleased",
-            button: "left",
-            clickCount: 1,
-            x: clickX,
-            y: clickY,
-          });
-        } catch (err) {}
-        return;
-      }
-
-      if (msg.type === "WHEEL" && msg.x !== undefined && msg.y !== undefined) {
-        const wheelX = Math.round(msg.x);
-        const wheelY = Math.round(msg.y);
-        const deltaX = Number(msg.deltaX) || 0;
-        const deltaY = Number(msg.deltaY) || 0;
-
-        try {
-          await cdpClient.send("Input.dispatchMouseEvent", {
-            type: "mouseWheel",
-            x: wheelX,
-            y: wheelY,
-            deltaX,
-            deltaY,
-          });
-        } catch (err) {}
-        return;
-      }
-
-      if (msg.type === "TYPE" && msg.text) {
-        try {
-          await cdpClient.send("Input.insertText", { text: msg.text });
-          await cdpClient.send("Input.dispatchKeyEvent", {
-            type: "rawKeyDown",
-            key: "Enter",
-            code: "Enter",
-            windowsVirtualKeyCode: 13,
-            text: "\r",
-          });
-          await cdpClient.send("Input.dispatchKeyEvent", {
-            type: "keyUp",
-            key: "Enter",
-            code: "Enter",
-            windowsVirtualKeyCode: 13,
-          });
-        } catch (err) {}
-        return;
-      }
-
-      if (msg.type === "SEND_MESSAGE") {
+      // HEADLESS OUTBOUND MESSAGE DISPATCHER (Phase 3)
+      if (msg.type === "SEND_MESSAGE" || msg.type === "OUTBOUND_SEND") {
         if (!limiter.tryConsume(1)) {
           ws.send(
             JSON.stringify({
@@ -667,52 +652,54 @@ wss.on("connection", (ws: WebSocket) => {
           return;
         }
 
-        const msgId = nanoid();
-        const ts = hlc.now();
-        const convId = msg.conversationId || "general";
+        const clientMsgId = String(msg.clientMsgId || msg.idempotencyKey || nanoid());
+        const targetId = String(msg.targetId || msg.conversationId || "general");
         const cleaned = cleanMessageContent(msg.textContent || "");
 
-        singleWriterQueue.enqueueRealtime({
-          msgId,
-          conversationId: convId,
-          conversationName: msg.conversationName,
+        // 1. Ghi nhận Outbound Lifecycle FSM
+        singleWriterQueue.registerOutboundPending(clientMsgId, targetId, cleaned.cleanText);
+
+        // 2. Lưu tin nhắn tạm thời với trạng thái SENDING
+        await serverStorage.addMessage({
+          msgId: clientMsgId,
+          conversationId: targetId,
+          senderId: "ME",
           textContent: cleaned.cleanText,
           sender: "ME",
-          status: "DELIVERED",
-          timestamp: ts.physicalTime || Date.now(),
+          status: "SENDING",
+          timestamp: Date.now(),
           type: msg.mediaType || (msg.mediaUrl ? "IMAGE" : "TEXT"),
           mediaUrl: msg.mediaUrl,
         });
 
+        // 3. Phản hồi Optimistic Pending tới Client
         ws.send(
           JSON.stringify({
             status: "OPTIMISTIC_PENDING",
-            msgId,
+            msgId: clientMsgId,
+            clientMsgId,
             idempotencyKey: msg.idempotencyKey,
-            hlc: ts,
+            hlc: hlc.now(),
           })
         );
 
+        // 4. Bắn trực tiếp qua In-Memory Headless Dispatcher (KHÔNG dùng DOM typing)
         if (cleaned.cleanText) {
-          try {
-            await cdpClient.send("Input.insertText", { text: cleaned.cleanText });
-            await cdpClient.send("Input.dispatchKeyEvent", {
-              type: "rawKeyDown",
-              key: "Enter",
-              code: "Enter",
-              windowsVirtualKeyCode: 13,
-              nativeVirtualKeyCode: 13,
-              unmodifiedText: "\r",
-              text: "\r",
+          inContextHook.sendHeadlessMessage(targetId, cleaned.cleanText).then((res) => {
+            if (!res.success) {
+              singleWriterQueue.emit("outbound_status", {
+                clientMsgId,
+                status: "FAILED",
+                error: res.error,
+              });
+            }
+          }).catch((err) => {
+            singleWriterQueue.emit("outbound_status", {
+              clientMsgId,
+              status: "FAILED",
+              error: err.message,
             });
-            await cdpClient.send("Input.dispatchKeyEvent", {
-              type: "keyUp",
-              key: "Enter",
-              code: "Enter",
-              windowsVirtualKeyCode: 13,
-              nativeVirtualKeyCode: 13,
-            });
-          } catch (cdpErr) {}
+          });
         }
       } else if (msg.type === "PING") {
         ws.send(JSON.stringify({ type: "PONG", timestamp: Date.now() }));
@@ -730,6 +717,6 @@ wss.on("connection", (ws: WebSocket) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🌐 Universal Zalo Gateway Hub listening on http://0.0.0.0:${PORT}`);
-  console.log(`⚡ Single-Writer Priority Queue, In-Context Hook & CDC Streaming active`);
+  console.log(`🌐 Universal Zalo Enterprise Gateway listening on http://0.0.0.0:${PORT}`);
+  console.log(`⚡ 3NF Architecture, Blue/Green Staging & Headless Dispatcher active.`);
 });
