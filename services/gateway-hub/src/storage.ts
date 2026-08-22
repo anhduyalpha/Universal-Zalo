@@ -387,6 +387,18 @@ export class ServerStorageEngine extends EventEmitter {
     this.flushToDisk();
   }
 
+  public upsertConversation(c: StoredConversation) {
+    if (!c.id) return;
+    const strId = String(c.id);
+    const existing = this.conversations.get(strId);
+    this.conversations.set(strId, {
+      ...existing,
+      ...c,
+      id: strId,
+    });
+    this.flushToDisk();
+  }
+
   public getContacts(): StoredContact[] {
     return Array.from(this.contacts.values());
   }
@@ -405,6 +417,24 @@ export class ServerStorageEngine extends EventEmitter {
       });
     }
     this.flushToDisk();
+  }
+
+  public upsertContact(ct: StoredContact) {
+    if (!ct.id) return;
+    const strId = String(ct.id);
+    const existing = this.contacts.get(strId);
+    this.contacts.set(strId, {
+      ...existing,
+      ...ct,
+      id: strId,
+    });
+    this.flushToDisk();
+  }
+
+  public saveMessages(conversationId: string, msgs: StoredMessage[]) {
+    for (const m of msgs) {
+      this.addMessage(m);
+    }
   }
 
   public getHighWaterMark(conversationId: string): number {
