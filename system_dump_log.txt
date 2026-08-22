@@ -1,0 +1,138 @@
+universal_zalo_gateway  | 🌐 Universal Zalo Enterprise Gateway listening on http://0.0.0.0:8080
+universal_zalo_gateway  | ⚡ 3NF Architecture, Blue/Green Staging & Headless Dispatcher active.
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | [In-Context Hook Warning] Initialization retry scheduled: CDP client is disconnected, failed to execute Runtime.addBinding
+universal_zalo_gateway  | 🔌 [CDP Client] Connected to persistent multiplexed CDP Session (ws://zalo-chromium:9222/devtools/page/B8859517121EDEE5D4151FE4DD58A3C9)
+universal_zalo_gateway   | ⚡ [In-Context Hook] Initialized 3NF decapsulator, edge filter & headless outbound dispatcher.
+universal_zalo_gateway   | ⚡ Starting Live Sync via WebSocket...
+universal_zalo_gateway   | ⚡ [Chunked Sync] Starting 3NF bounded IDBCursor sync...
+universal_zalo_gateway   | 🚀 [Full Resync] Starting Blue/Green Staging Session for Offline Ingestion...
+universal_zalo_gateway   | 🎉 [Staging Swap] Successfully swapped 0 convs, 0 contacts, 0 messages.
+universal_zalo_redis     | 1:C 22 Aug 2026 02:21:09.511 # WARNING Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. Being disabled, it can also cause failures without low memory condition, see https://github.com/jemalloc/jemalloc/issues/1328. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+universal_zalo_redis     | 1:C 22 Aug 2026 02:21:09.511 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+universal_zalo_redis     | 1:C 22 Aug 2026 02:21:09.511 * Redis version=7.4.10, bits=64, commit=00000000, modified=0, pid=1, just started
+universal_zalo_redis     | 1:C 22 Aug 2026 02:21:09.511 * Configuration loaded
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:09.511 * monotonic clock: POSIX clock_gettime
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:09.682 * Running mode=standalone, port=6379.
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:09.682 * Server initialized
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:09.990 * Reading RDB base file on AOF loading...
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.085 * Loading RDB produced by version 7.4.10
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.085 * RDB age 227599 seconds
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.085 * RDB memory usage when created 0.90 Mb
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.085 * RDB is base AOF
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.085 * Done loading RDB, keys loaded: 0, keys expired: 0.
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.117 * DB loaded from base file appendonly.aof.1.base.rdb: 0.182 seconds
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.118 * DB loaded from append only file: 0.316 seconds
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.118 * Opening AOF incr file appendonly.aof.1.incr.aof on server start
+universal_zalo_redis     | 1:M 22 Aug 2026 02:21:10.118 * Ready to accept connections tcp
+universal_zalo_chromium  | 🔄 Đợi Proxy Server khởi tạo chứng chỉ CA...
+universal_zalo_postgres  | 
+universal_zalo_postgres  | PostgreSQL Database directory appears to contain a database; Skipping initialization
+universal_zalo_chromium  | 🧹 Dọn dẹp stale lock files...
+universal_zalo_postgres  | 
+universal_zalo_chromium  | 🌐 Bật socat port forwarder 0.0.0.0:9222 -> 127.0.0.1:9223...
+universal_zalo_postgres  | 2026-08-22 02:21:18.005 UTC [1] LOG:  starting PostgreSQL 16.15 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+universal_zalo_proxy     | [2m2026-08-22T02:21:10.996827Z[0m [32m INFO[0m [2mzalo_proxy[0m[2m:[0m 🚀 Zalo SOCKS5 Loopback Proxy listening on 0.0.0.0:9050
+universal_zalo_postgres  | 2026-08-22 02:21:18.005 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+universal_zalo_postgres  | 2026-08-22 02:21:18.005 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+universal_zalo_postgres  | 2026-08-22 02:21:18.336 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+universal_zalo_postgres  | 2026-08-22 02:21:18.896 UTC [29] LOG:  database system was shut down at 2026-08-22 02:12:57 UTC
+universal_zalo_postgres  | 2026-08-22 02:21:19.845 UTC [1] LOG:  database system is ready to accept connections
+universal_zalo_postgres  | 2026-08-22 02:26:18.817 UTC [27] LOG:  checkpoint starting: time
+universal_zalo_postgres  | 2026-08-22 02:26:19.252 UTC [27] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.123 s, sync=0.028 s, total=0.435 s; sync files=2, longest=0.021 s, average=0.014 s; distance=0 kB, estimate=0 kB; lsn=0/1926958, redo lsn=0/1926920
+universal_zalo_chromium  | 🌐 Khởi chạy Chromium Headless (Chuẩn Desktop 1440x900) kết nối qua socks5://zalo-proxy:9050...
+universal_zalo_chromium  | 2026/08/22 02:21:14 socat[14] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:16 socat[22] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:17 socat[23] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:19 socat[24] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:20 socat[25] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:21 socat[26] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:23 socat[27] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:24 socat[28] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:26 socat[29] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:26 socat[30] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:29 socat[31] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:29 socat[32] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:31 socat[41] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:32 socat[42] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:34 socat[43] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:35 socat[44] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:36 socat[45] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:38 socat[46] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:39 socat[49] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | [1:55:0822/022139.930810:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+universal_zalo_chromium  | 2026/08/22 02:21:41 socat[58] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:41 socat[59] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:44 socat[61] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:44 socat[62] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:46 socat[63] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | [1:55:0822/022147.475642:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | [1:55:0822/022147.475802:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+universal_zalo_chromium  | [1:55:0822/022147.475862:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+universal_zalo_chromium  | [1:55:0822/022147.475892:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | 2026/08/22 02:21:47 socat[68] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:49 socat[72] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:50 socat[76] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:51 socat[77] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:53 socat[89] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:54 socat[90] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | [1:55:0822/022154.593589:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | 2026/08/22 02:21:56 socat[100] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:56 socat[101] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:59 socat[102] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:21:59 socat[109] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | [1:55:0822/022159.980459:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | 2026/08/22 02:22:01 socat[112] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 2026/08/22 02:22:02 socat[116] E connect(5, AF=2 127.0.0.1:9223, 16): Connection refused
+universal_zalo_chromium  | 
+universal_zalo_chromium  | DevTools listening on ws://127.0.0.1:9223/devtools/browser/0c905e4e-0817-42e6-bc1a-2bcf985f173a
+universal_zalo_chromium  | [1:1:0822/022211.336420:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:55:0822/022211.336562:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | [1:1:0822/022211.336630:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:55:0822/022211.336747:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | [1:1:0822/022211.338126:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:1:0822/022211.396477:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:1:0822/022211.578739:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:55:0822/022211.578761:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+universal_zalo_chromium  | [1:55:0822/022211.578828:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+universal_zalo_chromium  | [1:1:0822/022211.579160:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:55:0822/022211.579256:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | [1:1:0822/022212.097056:ERROR:content/browser/network_service_instance_impl.cc:618] Network service crashed or was terminated, restarting service.
+universal_zalo_chromium  | [1:1:0822/022212.991525:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.Properties.GetAll: object_path= /org/freedesktop/UPower/devices/DisplayDevice: unknown error type: 
+universal_zalo_chromium  | [1:1:0822/022212.991580:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:55:0822/022212.991775:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | [1:1:0822/022214.533518:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:55:0822/022214.533654:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+universal_zalo_chromium  | [1:1:0822/022214.692917:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+universal_zalo_chromium  | [1:56:0822/022222.766158:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT
+universal_zalo_chromium  | [1:56:0822/022243.812009:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT
+universal_zalo_chromium  | [1:56:0822/022328.450649:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT
+universal_zalo_chromium  | [1:56:0822/022459.072906:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT
+universal_zalo_web       | 
+universal_zalo_web       | > web-client@0.1.0 start
+universal_zalo_web       | > next start -p 3000
+universal_zalo_web       | 
+universal_zalo_web       |   ▲ Next.js 14.2.35
+universal_zalo_web       |   - Local:        http://localhost:3000
+universal_zalo_web       | 
+universal_zalo_web       |  ✓ Starting...
+universal_zalo_web       |  ✓ Ready in 10s
