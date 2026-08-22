@@ -3,10 +3,10 @@ import { singleWriterQueue, IngestionMessageTask } from "./queue_writer.js";
 import EventEmitter from "events";
 
 /**
- * IN-CONTEXT HOOKING & HEADLESS OUTBOUND DISPATCHER (Phases 1, 2, 3)
- * - Đảm bảo ép kiểu chuỗi đệ quy (String Cast) cho toàn bộ ID để triệt tiêu IEEE 754 precision loss
- * - Phân định rạch ròi phạm vi Container (conversationId) và Author (senderId)
- * - Móc trực tiếp Dispatcher nội bộ: `window.__INJECTED_SEND__(targetId, content, meta)`
+ * IN-CONTEXT HOOKING & UNIVERSAL HEADLESS OUTBOUND DISPATCHER (Phases 1, 2, 3)
+ * - IDBObjectStore.prototype Hooking: Bắt trực tiếp 100% tin nhắn đã giải mã khi Zalo ghi vào IndexedDB
+ * - Webpack Chunk Tapper: Khai thác store nội bộ của Zalo qua webpackChunkzalo_chat_web
+ * - Universal Outbound Dispatcher: Tự động chuyển hội thoại và gửi tin nhắn an toàn
  */
 export class InContextHookEngine extends EventEmitter {
   private isInitialized = false;
@@ -28,7 +28,7 @@ export class InContextHookEngine extends EventEmitter {
       await this.injectBrowserHook();
 
       this.isInitialized = true;
-      console.log("⚡ [In-Context Hook] Initialized 3NF decapsulator, edge filter & headless outbound dispatcher.");
+      console.log("⚡ [In-Context Hook] Initialized Universal IDB Hook & Webpack Outbound Dispatcher.");
     } catch (err: any) {
       console.warn("[In-Context Hook Warning] Initialization retry scheduled:", err.message);
       setTimeout(() => this.initialize(), 3000);
@@ -71,7 +71,7 @@ export class InContextHookEngine extends EventEmitter {
         if (window.__ZALO_ENTERPRISE_HOOK_INITIALIZED__) return;
         window.__ZALO_ENTERPRISE_HOOK_INITIALIZED__ = true;
 
-        console.log("🚀 [Universal Zalo] Injected Enterprise 3NF Hook & Headless Dispatcher...");
+        console.log("🚀 [Universal Zalo] Injected Universal IDB Hook & Outbound Dispatcher...");
 
         // 1. Recursive String ID Sanitizer (Loại bỏ triệt để lỗi làm tròn số 64-bit IEEE 754)
         const sanitizeIdsToString = (obj) => {
@@ -110,15 +110,39 @@ export class InContextHookEngine extends EventEmitter {
           }
         };
 
-        // 3. HEADLESS OUTBOUND DISPATCHER (window.__INJECTED_SEND__)
+        // 3. WEBPACK CHUNK TAPPER: Khai thác Redux Store nội bộ của Zalo Web
+        try {
+          if (window.webpackChunkzalo_chat_web && Array.isArray(window.webpackChunkzalo_chat_web)) {
+            window.webpackChunkzalo_chat_web.push([
+              [Symbol()],
+              {},
+              (req) => {
+                try {
+                  for (const key of Object.keys(req.c)) {
+                    const mod = req.c[key]?.exports;
+                    if (!mod) continue;
+                    if (mod.default?.dispatch && mod.default?.getState) {
+                      window.__ZALO_REDUX_STORE__ = mod.default;
+                    } else if (mod.dispatch && mod.getState) {
+                      window.__ZALO_REDUX_STORE__ = mod;
+                    }
+                  }
+                } catch (e) {}
+              }
+            ]);
+          }
+        } catch (e) {}
+
+        // 4. UNIVERSAL HEADLESS OUTBOUND DISPATCHER
         window.__INJECTED_SEND__ = async (targetId, content, meta = {}) => {
           const strTargetId = String(targetId);
           console.log("[Headless Dispatcher] Sending message to target:", strTargetId, content);
 
-          // Cách A: Hook Redux Dispatcher nếu có
-          if (window.appStore && typeof window.appStore.dispatch === 'function') {
+          // Cách 1: Thử dispatch qua Redux Store nếu bắt được
+          const store = window.__ZALO_REDUX_STORE__ || window.appStore || window.zaloStore;
+          if (store && typeof store.dispatch === 'function') {
             try {
-              window.appStore.dispatch({
+              store.dispatch({
                 type: "CHAT_SEND_MESSAGE",
                 payload: {
                   threadId: strTargetId,
@@ -131,82 +155,122 @@ export class InContextHookEngine extends EventEmitter {
             } catch (rErr) {}
           }
 
-          // Cách B: Focus & Synthetic Paste Event (Tránh lỗi Draft.js / ContentEditable)
-          const editor = document.querySelector('[contenteditable="true"]') || document.querySelector('.rich-input__box');
-          if (editor) {
-            editor.focus();
-            try {
-              const dt = new DataTransfer();
-              dt.setData('text/plain', content);
-              const pasteEvt = new ClipboardEvent('paste', {
-                clipboardData: dt,
+          // Cách 2: Tự động chuyển hội thoại và gõ phím mô phỏng
+          try {
+            // Tìm và click vào conversation trên sidebar nếu chưa đúng hội thoại
+            const convItems = document.querySelectorAll('.conv-item, [data-id], .chat-item, .nav-tabs-item');
+            for (const item of convItems) {
+              const text = item.textContent || "";
+              const idAttr = item.getAttribute('data-id') || item.getAttribute('id') || "";
+              if (idAttr.includes(strTargetId) || text.includes(strTargetId)) {
+                item.click();
+                await new Promise(r => setTimeout(r, 200));
+                break;
+              }
+            }
+
+            // Tìm khung soạn thảo rich-text của Zalo
+            const editor = document.querySelector('[contenteditable="true"]') || 
+                           document.querySelector('#chat-input-editor') ||
+                           document.querySelector('.rich-input__box') ||
+                           document.querySelector('textarea');
+
+            if (editor) {
+              editor.focus();
+              
+              // Chèn nội dung text sạch
+              if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
+                document.execCommand('insertText', false, content);
+              } else {
+                editor.innerText = content;
+                editor.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+
+              await new Promise(r => setTimeout(r, 100));
+
+              // Nhấn phím Enter để gửi
+              const enterDown = new KeyboardEvent('keydown', {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
                 bubbles: true,
                 cancelable: true,
               });
-              editor.dispatchEvent(pasteEvt);
+              editor.dispatchEvent(enterDown);
 
-              setTimeout(() => {
-                const enterEvt = new KeyboardEvent('keydown', {
-                  key: 'Enter',
-                  code: 'Enter',
-                  keyCode: 13,
-                  which: 13,
-                  bubbles: true,
-                  cancelable: true,
-                });
-                editor.dispatchEvent(enterEvt);
-              }, 50);
+              const enterUp = new KeyboardEvent('keyup', {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                cancelable: true,
+              });
+              editor.dispatchEvent(enterUp);
 
-              return { success: true, method: "CLIPBOARD_PASTE" };
-            } catch (pErr) {}
+              // Click nút gửi nếu có
+              const sendBtn = document.querySelector('.btn-send, [title*="Gửi"], [aria-label*="Gửi"], .send-icon');
+              if (sendBtn) {
+                sendBtn.click();
+              }
+
+              return { success: true, method: "SYNTHETIC_DOM_DISPATCH" };
+            }
+          } catch (domErr) {
+            return { success: false, error: domErr.message };
           }
 
-          return { success: true, method: "FALLBACK_QUEUED" };
+          return { success: false, error: "Unable to find message input or dispatcher" };
         };
 
-        // 4. Hook WebSocket.prototype để bắt tin nhắn đã giải mã (Decoupled Scope Routing)
-        const originalAddEventListener = WebSocket.prototype.addEventListener;
-        WebSocket.prototype.addEventListener = function(type, listener, options) {
-          if (type === 'message') {
-            const wrappedListener = function(event) {
-              try {
-                if (typeof event.data === 'string' && event.data.startsWith('{')) {
-                  const rawData = JSON.parse(event.data);
-                  const data = sanitizeIdsToString(rawData);
+        // 5. IDBObjectStore.prototype HOOKING (Zero-Loss Real-time Pipeline)
+        // Bắt trực tiếp mọi tin nhắn khi Zalo Web giải mã và ghi vào IndexedDB
+        if (window.IDBObjectStore && window.IDBObjectStore.prototype) {
+          const originalPut = IDBObjectStore.prototype.put;
+          const originalAdd = IDBObjectStore.prototype.add;
 
-                  // Bỏ qua heartbeat / typing / presence noise
-                  if (data && data.data && (data.data.msgId || data.data.content || data.data.msgBody)) {
-                    const msg = data.data;
-                    const isMe = Boolean(msg.isMe || msg.fromMe || msg.senderType === 1);
-                    
-                    // Decoupled Scope Routing (Phân định rạch ròi Container vs Author)
-                    const isGroup = Boolean(msg.grid || (msg.threadId && String(msg.threadId).startsWith('g_')));
-                    const convId = isGroup 
-                      ? String(msg.grid || msg.threadId)
-                      : String(msg.uid || msg.threadId || msg.toId || "general");
-                    const senderId = isMe ? "ME" : String(msg.fromUid || msg.fromId || msg.uid || convId);
+          const inspectAndEnqueue = (value, storeName) => {
+            try {
+              if (value && typeof value === 'object') {
+                const rawMsg = value.message || value.content || value.text || value.msgBody || value.data;
+                const msgId = value.msgId || value.globalMsgId || value.id || value.cliMsgId;
 
-                    enqueueEvent({
-                      msgId: String(msg.msgId || msg.globalMsgId || msg.cliMsgId || Date.now()),
-                      conversationId: convId,
-                      senderId: senderId,
-                      senderName: msg.senderName || msg.displayName || msg.name,
-                      senderAvatar: msg.avatar || msg.senderAvatar,
-                      textContent: msg.content || msg.message || msg.text || msg.msgBody || "",
-                      sender: isMe ? "ME" : "OTHER",
-                      timestamp: Number(msg.timestamp || msg.ts || Date.now()),
-                      type: msg.msgType || msg.type || "TEXT",
-                      mediaUrl: msg.mediaUrl || msg.url || null,
-                    });
-                  }
+                if (msgId && (rawMsg || value.mediaUrl || value.url || value.thumbUrl || value.msgType)) {
+                  const isMe = Boolean(value.isMe || value.fromMe || value.senderType === 1);
+                  const isGroup = Boolean(value.grid || (value.threadId && String(value.threadId).startsWith('g_')));
+                  const convId = isGroup 
+                    ? String(value.grid || value.threadId)
+                    : String(value.uid || value.threadId || value.toId || "general");
+                  const senderId = isMe ? "ME" : String(value.fromUid || value.fromId || value.uid || convId);
+
+                  enqueueEvent({
+                    msgId: String(msgId),
+                    conversationId: convId,
+                    senderId: senderId,
+                    senderName: value.senderName || value.displayName || value.name,
+                    senderAvatar: value.avatar || value.senderAvatar,
+                    textContent: typeof rawMsg === 'string' ? rawMsg : (rawMsg ? JSON.stringify(rawMsg) : ""),
+                    sender: isMe ? "ME" : "OTHER",
+                    timestamp: Number(value.timestamp || value.ts || value.sendTime) || Date.now(),
+                    type: value.msgType || value.type || (value.mediaUrl ? "IMAGE" : "TEXT"),
+                    mediaUrl: value.mediaUrl || value.url || null,
+                  });
                 }
-              } catch (e) {}
-              return listener.apply(this, arguments);
-            };
-            return originalAddEventListener.call(this, type, wrappedListener, options);
-          }
-          return originalAddEventListener.call(this, type, listener, options);
-        };
+              }
+            } catch (err) {}
+          };
+
+          IDBObjectStore.prototype.put = function(value, key) {
+            inspectAndEnqueue(value, this.name);
+            return originalPut.apply(this, arguments);
+          };
+
+          IDBObjectStore.prototype.add = function(value, key) {
+            inspectAndEnqueue(value, this.name);
+            return originalAdd.apply(this, arguments);
+          };
+        }
       })();
     `;
 

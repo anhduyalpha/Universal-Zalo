@@ -54,6 +54,8 @@ function AvatarWithFallback({
       <img
         src={effectiveSrc}
         alt={cleanName}
+        referrerPolicy="no-referrer"
+        loading="lazy"
         onError={() => setHasError(true)}
         style={{
           width: size,
@@ -1434,6 +1436,8 @@ export default function ZChatDeskApp() {
                         <img
                           src={mediaProxyUrl}
                           alt="Media Attachment"
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
                           onClick={() => setPreviewImage(mediaProxyUrl)}
                           style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 8, marginBottom: 6, display: "block", objectFit: "contain", cursor: "pointer" }}
                         />
@@ -1705,7 +1709,7 @@ export default function ZChatDeskApp() {
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
                   <span style={{ color: "#64748b" }}>Outbound:</span>
-                  <span style={{ color: "#10b981", fontWeight: 700 }}>🟢 Headless Dispatch</span>
+                  <span style={{ color: "#10b981", fontWeight: 700 }}>🟢 Universal Dispatch</span>
                 </div>
               </div>
             </div>
@@ -1837,6 +1841,7 @@ export default function ZChatDeskApp() {
           <img
             src={previewImage}
             alt="Preview"
+            referrerPolicy="no-referrer"
             style={{ maxWidth: "90%", maxHeight: "90%", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,0.8)" }}
           />
         </div>

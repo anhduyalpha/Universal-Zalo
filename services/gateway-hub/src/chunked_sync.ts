@@ -15,10 +15,10 @@ export interface SyncCursorState {
 }
 
 /**
- * 3NF CHUNKED PAGINATED HISTORICAL SYNC ENGINE (Phases 1 & 2)
- * - IDBCursor Bounded Batch Pagination (500 items per chunk)
- * - String ID Sanitization (tránh tràn số 64-bit IEEE 754)
- * - Decoupled Container vs Author Scope Routing
+ * 3NF UNIVERSAL IDBCURSOR BATCH SYNC ENGINE (Phases 1 & 2)
+ * - Quét toàn bộ ObjectStores trong mọi IndexedDB databases
+ * - IDBCursor Bounded Pagination (500 records/chunk)
+ * - Tự động nhận diện và trích xuất Conversation, Contact, Message
  */
 export class ChunkedSyncEngine {
   private cursors: Record<string, SyncCursorState> = {};
@@ -64,7 +64,7 @@ export class ChunkedSyncEngine {
   public async executeChunkedSync(
     onProgress?: (percent: number, log: string) => void
   ): Promise<{ totalMessages: number; totalConversations: number }> {
-    console.log("⚡ [Chunked Sync] Starting 3NF bounded IDBCursor sync...");
+    console.log("⚡ [Chunked Sync] Starting Universal 3NF IDBCursor sync...");
 
     const script = `
       (async () => {
@@ -73,6 +73,11 @@ export class ChunkedSyncEngine {
           if (!window.indexedDB || typeof window.indexedDB.databases !== 'function') {
             return summary;
           }
+
+          const sanitizeId = (id) => {
+            if (id === null || id === undefined) return "";
+            return String(id).trim();
+          };
 
           const dbs = await window.indexedDB.databases();
           for (const dbInfo of dbs) {
@@ -86,70 +91,69 @@ export class ChunkedSyncEngine {
 
               const storeNames = Array.from(db.objectStoreNames);
               for (const storeName of storeNames) {
-                if (storeName.includes('msg') || storeName.includes('message') || storeName.includes('chat') || storeName.includes('history')) {
-                  try {
-                    await new Promise((resolve) => {
-                      const tx = db.transaction(storeName, "readonly");
-                      const store = tx.objectStore(storeName);
-                      const req = store.openCursor();
+                try {
+                  await new Promise((resolve) => {
+                    const tx = db.transaction(storeName, "readonly");
+                    const store = tx.objectStore(storeName);
+                    const req = store.openCursor();
 
-                      let batch = [];
-                      const BATCH_LIMIT = 500;
+                    let batch = [];
+                    const BATCH_LIMIT = 500;
 
-                      req.onsuccess = async (e) => {
-                        const cursor = e.target.result;
-                        if (cursor) {
-                          const val = cursor.value;
-                          if (val && typeof val === 'object') {
-                            const rawMsg = val.message || val.content || val.text || val.msgBody || val.data;
-                            const msgId = val.msgId || val.globalMsgId || val.id || val.cliMsgId;
-                            if (msgId && (rawMsg || val.mediaUrl || val.url)) {
-                              const isMe = Boolean(val.isMe || val.fromMe || val.senderType === 1);
-                              const isGroup = Boolean(val.grid || (val.threadId && String(val.threadId).startsWith('g_')));
-                              const convId = isGroup 
-                                ? String(val.grid || val.threadId)
-                                : String(val.uid || val.threadId || val.toId || "general");
-                              const senderId = isMe ? "ME" : String(val.fromUid || val.fromId || val.uid || convId);
+                    req.onsuccess = async (e) => {
+                      const cursor = e.target.result;
+                      if (cursor) {
+                        const val = cursor.value;
+                        if (val && typeof val === 'object') {
+                          const rawMsg = val.message || val.content || val.text || val.msgBody || val.data;
+                          const msgId = val.msgId || val.globalMsgId || val.id || val.cliMsgId;
 
-                              batch.push({
-                                msgId: String(msgId),
-                                conversationId: convId,
-                                senderId: senderId,
-                                senderName: val.senderName || val.displayName || val.name,
-                                senderAvatar: val.avatar || val.senderAvatar,
-                                textContent: typeof rawMsg === 'string' ? rawMsg : JSON.stringify(rawMsg),
-                                sender: isMe ? "ME" : "OTHER",
-                                timestamp: Number(val.timestamp || val.ts || val.sendTime) || Date.now(),
-                                type: val.msgType || val.type || (val.mediaUrl ? "IMAGE" : "TEXT"),
-                                mediaUrl: val.mediaUrl || val.url || null,
-                              });
-                            }
+                          if (msgId && (rawMsg || val.mediaUrl || val.url || val.thumbUrl || val.msgType)) {
+                            const isMe = Boolean(val.isMe || val.fromMe || val.senderType === 1);
+                            const isGroup = Boolean(val.grid || (val.threadId && String(val.threadId).startsWith('g_')));
+                            const convId = isGroup 
+                              ? sanitizeId(val.grid || val.threadId)
+                              : sanitizeId(val.uid || val.threadId || val.toId || "general");
+                            const senderId = isMe ? "ME" : sanitizeId(val.fromUid || val.fromId || val.uid || convId);
+
+                            batch.push({
+                              msgId: sanitizeId(msgId),
+                              conversationId: convId,
+                              senderId: senderId,
+                              senderName: val.senderName || val.displayName || val.name,
+                              senderAvatar: val.avatar || val.senderAvatar,
+                              textContent: typeof rawMsg === 'string' ? rawMsg : (rawMsg ? JSON.stringify(rawMsg) : ""),
+                              sender: isMe ? "ME" : "OTHER",
+                              timestamp: Number(val.timestamp || val.ts || val.sendTime) || Date.now(),
+                              type: val.msgType || val.type || (val.mediaUrl ? "IMAGE" : "TEXT"),
+                              mediaUrl: val.mediaUrl || val.url || null,
+                            });
                           }
-
-                          if (batch.length >= BATCH_LIMIT) {
-                            summary.totalMessages += batch.length;
-                            if (typeof window.emitZaloChunk === 'function') {
-                              window.emitZaloChunk(JSON.stringify({ store: storeName, chunk: batch }));
-                            }
-                            batch = [];
-                          }
-
-                          cursor.continue();
-                        } else {
-                          if (batch.length > 0) {
-                            summary.totalMessages += batch.length;
-                            if (typeof window.emitZaloChunk === 'function') {
-                              window.emitZaloChunk(JSON.stringify({ store: storeName, chunk: batch }));
-                            }
-                          }
-                          resolve(true);
                         }
-                      };
 
-                      req.onerror = () => resolve(false);
-                    });
-                  } catch (sErr) {}
-                }
+                        if (batch.length >= BATCH_LIMIT) {
+                          summary.totalMessages += batch.length;
+                          if (typeof window.emitZaloChunk === 'function') {
+                            window.emitZaloChunk(JSON.stringify({ store: storeName, chunk: batch }));
+                          }
+                          batch = [];
+                        }
+
+                        cursor.continue();
+                      } else {
+                        if (batch.length > 0) {
+                          summary.totalMessages += batch.length;
+                          if (typeof window.emitZaloChunk === 'function') {
+                            window.emitZaloChunk(JSON.stringify({ store: storeName, chunk: batch }));
+                          }
+                        }
+                        resolve(true);
+                      }
+                    };
+
+                    req.onerror = () => resolve(false);
+                  });
+                } catch (sErr) {}
               }
               db.close();
             } catch (dbErr) {}
