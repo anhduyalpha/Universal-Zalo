@@ -1,28 +1,28 @@
 # ==============================================================================
 # Dockerfile cho Gateway Hub (Node.js / TypeScript WebSocket Server)
 # ==============================================================================
-FROM node:20-alpine AS builder
+FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
 
 COPY services/gateway-hub/package.json ./
 COPY services/gateway-hub/tsconfig.json ./
 
-RUN npm install
+RUN npm install --ignore-scripts
 
 COPY services/gateway-hub/src ./src
 
 RUN npm run build
 
 # Production Runner
-FROM node:20-alpine AS runner
+FROM node:20-bookworm-slim AS runner
 
 WORKDIR /app
 
 ENV NODE_ENV=production
 
 COPY services/gateway-hub/package.json ./
-RUN npm install --only=production
+RUN npm install --omit=dev --ignore-scripts
 
 COPY --from=builder /app/dist ./dist
 
