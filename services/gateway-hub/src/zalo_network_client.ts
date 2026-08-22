@@ -3,6 +3,7 @@ import zcaModule from "zca-js";
 import { cdpClient } from "./cdp_client.js";
 import { serverStorage } from "./storage.js";
 import { singleWriterQueue, IngestionMessageTask } from "./queue_writer.js";
+import { isBase64Ciphertext } from "./normalizer.js";
 import crypto from "crypto";
 import EventEmitter from "events";
 
@@ -195,7 +196,10 @@ export class ZaloNetworkClient extends EventEmitter {
           const senderId = isMe ? "ME" : String(data.uidFrom || convId);
 
           const rawContent = data.content;
-          const textContent = typeof rawContent === "string" ? rawContent : (rawContent?.title || rawContent?.msg || JSON.stringify(rawContent || ""));
+          let textContent = typeof rawContent === "string" ? rawContent : (rawContent?.title || rawContent?.msg || rawContent?.text || "");
+          if (isBase64Ciphertext(textContent)) {
+            textContent = "[Tin nhắn mã hóa E2EE]";
+          }
 
           const task: IngestionMessageTask = {
             msgId: String(data.msgId || data.cliMsgId || Date.now()),

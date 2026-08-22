@@ -2,7 +2,8 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { Readable } from "stream";
-import { ParsedReaction, MentionToken, cleanMessageContent } from "./normalizer.js";
+import { ParsedReaction, MentionToken, cleanMessageContent, isBase64Ciphertext } from "./normalizer.js";
+import { sessionAuthManager } from "./session_auth.js";
 import EventEmitter from "events";
 
 export type HydrationState = "COLD_START" | "STAGING_INGESTION" | "INTEGRITY_CHECK" | "HYDRATED";
@@ -229,7 +230,13 @@ export class ServerStorageEngine extends EventEmitter {
       if (fs.existsSync(MESSAGES_FILE)) {
         const raw = fs.readFileSync(MESSAGES_FILE, "utf-8");
         const loaded: StoredMessage[] = JSON.parse(raw);
-        this.messages = this.deduplicateMessagesById(loaded);
+        const sanitized = loaded.map((m) => {
+          if (isBase64Ciphertext(m.textContent)) {
+            return { ...m, textContent: "[Tin nhắn mã hóa E2EE]" };
+          }
+          return m;
+        });
+        this.messages = this.deduplicateMessagesById(sanitized);
       }
     } catch (e) {
       this.messages = [];
@@ -240,7 +247,15 @@ export class ServerStorageEngine extends EventEmitter {
         const raw = fs.readFileSync(CONVERSATIONS_FILE, "utf-8");
         const list: StoredConversation[] = JSON.parse(raw);
         for (const c of list) {
-          if (c.id) this.conversations.set(String(c.id), { ...c, id: String(c.id) });
+          if (c.id) {
+            if (isBase64Ciphertext(c.lastMessage)) {
+              c.lastMessage = "Đã đồng bộ từ Zalo";
+            }
+            if (isBase64Ciphertext(c.name)) {
+              c.name = `Hội thoại ${String(c.id).slice(-4)}`;
+            }
+            this.conversations.set(String(c.id), { ...c, id: String(c.id) });
+          }
         }
       }
     } catch (e) {}
@@ -250,7 +265,12 @@ export class ServerStorageEngine extends EventEmitter {
         const raw = fs.readFileSync(CONTACTS_FILE, "utf-8");
         const list: StoredContact[] = JSON.parse(raw);
         for (const ct of list) {
-          if (ct.id) this.contacts.set(String(ct.id), { ...ct, id: String(ct.id) });
+          if (ct.id) {
+            if (isBase64Ciphertext(ct.displayName)) {
+              ct.displayName = `Người dùng ${String(ct.id).slice(-4)}`;
+            }
+            this.contacts.set(String(ct.id), { ...ct, id: String(ct.id) });
+          }
         }
       }
     } catch (e) {}
@@ -463,20 +483,14 @@ export class ServerStorageEngine extends EventEmitter {
         return `/api/media/${filename}`;
       }
 
-      const res = await fetch(remoteUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          Referer: "https://chat.zalo.me/",
-        },
-      });
-
-      if (!res.ok) {
-        return `/api/media/proxy?url=${encodeURIComponent(remoteUrl)}`;
+      const mediaData = await sessionAuthManager.fetchZaloMedia(remoteUrl);
+      if (mediaData && mediaData.buffer.length > 0) {
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, mediaData.buffer);
+        return `/api/media/${filename}`;
       }
 
-      const buffer = Buffer.from(await res.arrayBuffer());
-      fs.writeFileSync(fullPath, buffer);
-      return `/api/media/${filename}`;
+      return `/api/media/proxy?url=${encodeURIComponent(remoteUrl)}`;
     } catch (e) {
       return `/api/media/proxy?url=${encodeURIComponent(remoteUrl)}`;
     }

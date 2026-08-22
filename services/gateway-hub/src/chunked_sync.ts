@@ -105,8 +105,28 @@ export class ChunkedSyncEngine {
                       if (cursor) {
                         const val = cursor.value;
                         if (val && typeof val === 'object') {
-                          const rawMsg = val.message || val.content || val.text || val.msgBody || val.data;
+                          let rawMsg = val.message || val.content || val.text || val.msgBody || val.data;
                           const msgId = val.msgId || val.globalMsgId || val.id || val.cliMsgId;
+
+                          const isCipher = (text) => {
+                            if (!text || typeof text !== 'string') return false;
+                            const trimmed = text.trim();
+                            if (/^[A-Za-z0-9+/]{20,}={0,2}$/.test(trimmed)) return true;
+                            if (trimmed.startsWith('{') && (trimmed.includes('"params"') || trimmed.includes('"cipher"'))) return true;
+                            return false;
+                          };
+
+                          if (typeof rawMsg === 'string' && isCipher(rawMsg)) {
+                            if (val.msgBody && typeof val.msgBody.text === 'string' && !isCipher(val.msgBody.text)) {
+                              rawMsg = val.msgBody.text;
+                            } else if (val.desc && typeof val.desc === 'string' && !isCipher(val.desc)) {
+                              rawMsg = val.desc;
+                            } else if (val.title && typeof val.title === 'string' && !isCipher(val.title)) {
+                              rawMsg = val.title;
+                            } else {
+                              rawMsg = "[Tin nhắn mã hóa E2EE]";
+                            }
+                          }
 
                           if (msgId && (rawMsg || val.mediaUrl || val.url || val.thumbUrl || val.msgType)) {
                             const isMe = Boolean(val.isMe || val.fromMe || val.senderType === 1);

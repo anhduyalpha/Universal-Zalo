@@ -1,10 +1,12 @@
 import { cdpClient } from "./cdp_client.js";
 import { singleWriterQueue, IngestionMessageTask } from "./queue_writer.js";
+import { isBase64Ciphertext, cleanMessageContent } from "./normalizer.js";
 import EventEmitter from "events";
 
 /**
  * IN-CONTEXT HOOKING & UNIVERSAL HEADLESS OUTBOUND DISPATCHER (Phases 1, 2, 3)
- * - IDBObjectStore.prototype Hooking: Bắt trực tiếp 100% tin nhắn đã giải mã khi Zalo ghi vào IndexedDB
+ * - IDBObjectStore.prototype Hooking: Bắt trực tiếp tin nhắn đã giải mã khi Zalo ghi vào IndexedDB
+ * - Ciphertext Shield: Nhận diện và ngăn chặn lưu chuỗi Base64 chưa giải mã vào Database
  * - Webpack Chunk Tapper: Khai thác store nội bộ của Zalo qua webpackChunkzalo_chat_web
  * - Universal Outbound Dispatcher: Tự động chuyển hội thoại và gửi tin nhắn an toàn
  */
@@ -28,7 +30,7 @@ export class InContextHookEngine extends EventEmitter {
       await this.injectBrowserHook();
 
       this.isInitialized = true;
-      console.log("⚡ [In-Context Hook] Initialized Universal IDB Hook & Webpack Outbound Dispatcher.");
+      console.log("⚡ [In-Context Hook] Initialized Universal IDB Hook & Ciphertext Shield.");
     } catch (err: any) {
       console.warn("[In-Context Hook Warning] Initialization retry scheduled:", err.message);
       setTimeout(() => this.initialize(), 3000);
@@ -71,9 +73,9 @@ export class InContextHookEngine extends EventEmitter {
         if (window.__ZALO_ENTERPRISE_HOOK_INITIALIZED__) return;
         window.__ZALO_ENTERPRISE_HOOK_INITIALIZED__ = true;
 
-        console.log("🚀 [Universal Zalo] Injected Universal IDB Hook & Outbound Dispatcher...");
+        console.log("🚀 [Universal Zalo] Injected Universal IDB Hook & Ciphertext Shield...");
 
-        // 1. Recursive String ID Sanitizer (Loại bỏ triệt để lỗi làm tròn số 64-bit IEEE 754)
+        // 1. Recursive String ID Sanitizer
         const sanitizeIdsToString = (obj) => {
           if (!obj || typeof obj !== 'object') return obj;
           for (const key of Object.keys(obj)) {
@@ -88,6 +90,15 @@ export class InContextHookEngine extends EventEmitter {
             }
           }
           return obj;
+        };
+
+        // Helper nhận diện chuỗi mã hóa Ciphertext Base64
+        const isCipher = (text) => {
+          if (!text || typeof text !== 'string') return false;
+          const trimmed = text.trim();
+          if (/^[A-Za-z0-9+/]{20,}={0,2}$/.test(trimmed)) return true;
+          if (trimmed.startsWith('{') && (trimmed.includes('"params"') || trimmed.includes('"cipher"'))) return true;
+          return false;
         };
 
         // 2. Micro-Batching Buffer 100ms
@@ -157,7 +168,6 @@ export class InContextHookEngine extends EventEmitter {
 
           // Cách 2: Tự động chuyển hội thoại và gõ phím mô phỏng
           try {
-            // Tìm và click vào conversation trên sidebar nếu chưa đúng hội thoại
             const convItems = document.querySelectorAll('.conv-item, [data-id], .chat-item, .nav-tabs-item');
             for (const item of convItems) {
               const text = item.textContent || "";
@@ -169,7 +179,6 @@ export class InContextHookEngine extends EventEmitter {
               }
             }
 
-            // Tìm khung soạn thảo rich-text của Zalo
             const editor = document.querySelector('[contenteditable="true"]') || 
                            document.querySelector('#chat-input-editor') ||
                            document.querySelector('.rich-input__box') ||
@@ -178,7 +187,6 @@ export class InContextHookEngine extends EventEmitter {
             if (editor) {
               editor.focus();
               
-              // Chèn nội dung text sạch
               if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
                 document.execCommand('insertText', false, content);
               } else {
@@ -188,7 +196,6 @@ export class InContextHookEngine extends EventEmitter {
 
               await new Promise(r => setTimeout(r, 100));
 
-              // Nhấn phím Enter để gửi
               const enterDown = new KeyboardEvent('keydown', {
                 key: 'Enter',
                 code: 'Enter',
@@ -209,7 +216,6 @@ export class InContextHookEngine extends EventEmitter {
               });
               editor.dispatchEvent(enterUp);
 
-              // Click nút gửi nếu có
               const sendBtn = document.querySelector('.btn-send, [title*="Gửi"], [aria-label*="Gửi"], .send-icon');
               if (sendBtn) {
                 sendBtn.click();
@@ -224,8 +230,7 @@ export class InContextHookEngine extends EventEmitter {
           return { success: false, error: "Unable to find message input or dispatcher" };
         };
 
-        // 5. IDBObjectStore.prototype HOOKING (Zero-Loss Real-time Pipeline)
-        // Bắt trực tiếp mọi tin nhắn khi Zalo Web giải mã và ghi vào IndexedDB
+        // 5. IDBObjectStore.prototype HOOKING VỚI CIPHERTEXT SHIELD
         if (window.IDBObjectStore && window.IDBObjectStore.prototype) {
           const originalPut = IDBObjectStore.prototype.put;
           const originalAdd = IDBObjectStore.prototype.add;
@@ -233,8 +238,21 @@ export class InContextHookEngine extends EventEmitter {
           const inspectAndEnqueue = (value, storeName) => {
             try {
               if (value && typeof value === 'object') {
-                const rawMsg = value.message || value.content || value.text || value.msgBody || value.data;
+                let rawMsg = value.message || value.content || value.text || value.msgBody || value.data;
                 const msgId = value.msgId || value.globalMsgId || value.id || value.cliMsgId;
+
+                // Nếu rawMsg là ciphertext, thử lấy từ các trường text đã giải mã khác
+                if (typeof rawMsg === 'string' && isCipher(rawMsg)) {
+                  if (value.msgBody && typeof value.msgBody.text === 'string' && !isCipher(value.msgBody.text)) {
+                    rawMsg = value.msgBody.text;
+                  } else if (value.desc && typeof value.desc === 'string' && !isCipher(value.desc)) {
+                    rawMsg = value.desc;
+                  } else if (value.title && typeof value.title === 'string' && !isCipher(value.title)) {
+                    rawMsg = value.title;
+                  } else {
+                    rawMsg = "[Tin nhắn mã hóa E2EE]";
+                  }
+                }
 
                 if (msgId && (rawMsg || value.mediaUrl || value.url || value.thumbUrl || value.msgType)) {
                   const isMe = Boolean(value.isMe || value.fromMe || value.senderType === 1);
@@ -284,13 +302,18 @@ export class InContextHookEngine extends EventEmitter {
         const payload = JSON.parse(payloadStr);
         if (payload.type === "BATCH_EVENTS" && Array.isArray(payload.events)) {
           for (const ev of payload.events) {
+            let text = ev.textContent || "";
+            if (isBase64Ciphertext(text)) {
+              text = "[Tin nhắn mã hóa E2EE]";
+            }
+
             const task: IngestionMessageTask = {
               msgId: String(ev.msgId),
               conversationId: String(ev.conversationId),
               senderId: String(ev.senderId),
               senderName: ev.senderName,
               senderAvatar: ev.senderAvatar,
-              textContent: ev.textContent || "",
+              textContent: text,
               sender: ev.sender || "OTHER",
               status: "DELIVERED",
               timestamp: Number(ev.timestamp) || Date.now(),

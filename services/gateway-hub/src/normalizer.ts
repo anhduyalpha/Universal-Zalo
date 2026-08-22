@@ -100,11 +100,41 @@ const URL_REGEX = /(https?:\/\/[^\s]+|www\.[^\s]+)/gi;
 const MENTION_REGEX = /@([\p{L}\p{N}_\-\.\s]{2,30})(?=\s|$|[,\.\?!])/gu;
 
 /**
+ * Kiểm tra xem chuỗi có phải là Ciphertext (Base64 mã hóa AES/E2EE) của Zalo không
+ */
+export function isBase64Ciphertext(text: string): boolean {
+  if (!text || typeof text !== "string") return false;
+  const trimmed = text.trim();
+
+  // Kiểm tra chuỗi Base64 dài không chứa khoảng trắng (đặc trưng của AES Ciphertext Zalo)
+  if (/^[A-Za-z0-9+/]{20,}={0,2}$/.test(trimmed)) {
+    // Nếu không chứa bất kỳ từ tiếng Việt hay khoảng cách nào, đây là ciphertext
+    return true;
+  }
+
+  // Kiểm tra payload JSON mã hóa chứa trường "params" hoặc "cipher"
+  if (trimmed.startsWith("{") && (trimmed.includes('"params"') || trimmed.includes('"cipher"')) && trimmed.includes(":")) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Làm sạch nội dung tin nhắn, bóc tách chuỗi reaction rác, chuyển đổi inline emoji và nhận diện @mentions
  */
 export function cleanMessageContent(rawText: string): SanitizedMessageResult {
   if (!rawText || typeof rawText !== "string") {
     return { cleanText: "", reactions: [], mentions: [] };
+  }
+
+  // Nếu chuỗi là Base64 ciphertext chưa giải mã, chuyển thành thông báo thân thiện thay vì hiển thị chuỗi rác
+  if (isBase64Ciphertext(rawText)) {
+    return {
+      cleanText: "[Tin nhắn mã hóa E2EE]",
+      reactions: [],
+      mentions: [],
+    };
   }
 
   // 1. Bảo vệ tất cả URLs có trong tin nhắn bằng placeholder tạm thời

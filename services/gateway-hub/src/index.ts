@@ -11,6 +11,7 @@ import { singleWriterQueue, CdcEvent } from "./queue_writer.js";
 import { inContextHook } from "./in_context_hook.js";
 import { chunkedSync } from "./chunked_sync.js";
 import { zaloNetworkClient } from "./zalo_network_client.js";
+import { sessionAuthManager } from "./session_auth.js";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
@@ -211,32 +212,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      let cookieHeader = "";
-      try {
-        const cookieRes = await cdpClient.send("Network.getCookies", {
-          urls: ["https://chat.zalo.me", "https://zalo.me"],
-        });
-        if (cookieRes?.cookies && Array.isArray(cookieRes.cookies)) {
-          cookieHeader = cookieRes.cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
-        }
-      } catch (cErr) {}
-
-      const upstream = await fetch(targetUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          Referer: "https://chat.zalo.me/",
-          Cookie: cookieHeader,
-        },
-      });
-
-      if (upstream.ok) {
-        const buffer = Buffer.from(await upstream.arrayBuffer());
+      const mediaData = await sessionAuthManager.fetchZaloMedia(targetUrl);
+      if (mediaData && mediaData.buffer.length > 0) {
         res.writeHead(200, {
-          "Content-Type": upstream.headers.get("Content-Type") || "image/jpeg",
-          "Content-Length": buffer.length,
+          "Content-Type": mediaData.contentType,
+          "Content-Length": mediaData.buffer.length,
           "Cache-Control": "public, max-age=86400",
         });
-        res.end(buffer);
+        res.end(mediaData.buffer);
         return;
       }
     } catch (e) {}
@@ -377,21 +360,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const upstream = await fetch(targetUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          Referer: "https://chat.zalo.me/",
-        },
-      });
-
-      if (upstream.ok) {
-        const buffer = Buffer.from(await upstream.arrayBuffer());
+      const mediaData = await sessionAuthManager.fetchZaloMedia(targetUrl);
+      if (mediaData && mediaData.buffer.length > 0) {
         res.writeHead(200, {
-          "Content-Type": upstream.headers.get("Content-Type") || "image/jpeg",
-          "Content-Length": buffer.length,
+          "Content-Type": mediaData.contentType,
+          "Content-Length": mediaData.buffer.length,
           "Cache-Control": "public, max-age=86400",
         });
-        res.end(buffer);
+        res.end(mediaData.buffer);
         return;
       }
     } catch (e) {}

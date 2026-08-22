@@ -222,6 +222,16 @@ function MessageContentRenderer({
 }) {
   if (!text) return null;
 
+  // Kiểm tra chuỗi Base64 ciphertext chưa giải mã
+  const isCipher = /^[A-Za-z0-9+/]{20,}={0,2}$/.test(text.trim()) || (text.startsWith("{") && text.includes('"params"'));
+  if (isCipher) {
+    return (
+      <div style={{ wordBreak: "break-word", lineHeight: 1.5, fontSize: 13, fontStyle: "italic", opacity: 0.85, color: isMe ? "#e2e8f0" : "#94a3b8" }}>
+        🔒 [Tin nhắn mã hóa đầu cuối E2EE]
+      </div>
+    );
+  }
+
   const urlRegex = /(https?:\/\/[^\s]+)/g;
   const parts = text.split(urlRegex);
 
